@@ -1,22 +1,22 @@
 import { mapDefined } from '@atproto/common'
-import { AtUriString, DidString } from '@atproto/syntax'
-import { InvalidRequestError, Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
+import type { AtUriString, DidString } from '@atproto/syntax'
+import { InvalidRequestError, type Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
 import {
-  HydrateCtx,
-  Hydrator,
+  type HydrateCtxWithViewer,
+  type Hydrator,
   mergeManyStates,
-} from '../../../../hydration/hydrator'
+} from '../../../../hydration/hydrator.js'
 import { app } from '../../../../lexicons/index.js'
 import {
-  HydrationFnInput,
-  PresentationFnInput,
-  SkeletonFnInput,
+  type HydrationFnInput,
+  type PresentationFnInput,
+  type SkeletonFnInput,
   createPipeline,
   noRules,
-} from '../../../../pipeline'
-import { Views } from '../../../../views'
-import { clearlyBadCursor, resHeaders } from '../../../util'
+} from '../../../../pipeline.js'
+import type { Views } from '../../../../views/index.js'
+import { clearlyBadCursor, fillPage, resHeaders } from '../../../util.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getStarterPacksWithMembership = createPipeline(
@@ -34,10 +34,16 @@ export default function (server: Server, ctx: AppContext) {
         labelers,
         viewer,
       })
-      const result = await getStarterPacksWithMembership(
-        { ...params, hydrateCtx: hydrateCtx.copy({ viewer }) },
-        ctx,
-      )
+      const result = await fillPage({
+        cursor: params.cursor,
+        limit: params.limit,
+        fetch: ({ cursor, limit }) =>
+          getStarterPacksWithMembership(
+            { ...params, cursor, limit, hydrateCtx },
+            ctx,
+          ),
+        items: (r) => r.starterPacksWithMembership,
+      })
 
       return {
         encoding: 'application/json',
@@ -69,7 +75,7 @@ const skeleton = async (
   return {
     actorDid,
     starterPackUris: starterPackUris as AtUriString[],
-    cursor: cursor || undefined,
+    cursor,
   }
 }
 
@@ -126,7 +132,7 @@ type Context = {
 }
 
 type Params = app.bsky.graph.getStarterPacksWithMembership.$Params & {
-  hydrateCtx: HydrateCtx & { viewer: string }
+  hydrateCtx: HydrateCtxWithViewer
 }
 
 type SkeletonState = {

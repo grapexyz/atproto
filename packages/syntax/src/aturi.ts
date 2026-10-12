@@ -1,12 +1,12 @@
-import {
-  AtIdentifierString,
-  ensureValidAtIdentifier,
-  isDidIdentifier,
-} from './at-identifier.js'
-import { AtUriString } from './aturi_validation.js'
-import { DidString, InvalidDidError } from './did.js'
-import { NsidString, ensureValidNsid } from './nsid.js'
-import { RecordKeyString, ensureValidRecordKey } from './recordkey.js'
+import { ensureValidAtIdentifier, isDidIdentifier } from './at-identifier.js'
+import type { AtIdentifierString } from './at-identifier.js'
+import type { AtUriString } from './aturi_validation.js'
+import type { DidString } from './did.js'
+import { InvalidDidError } from './did.js'
+import type { NsidString } from './nsid.js'
+import { ensureValidNsid } from './nsid.js'
+import type { RecordKeyString } from './recordkey.js'
+import { ensureValidRecordKey } from './recordkey.js'
 
 export * from './aturi_validation.js'
 
@@ -133,19 +133,25 @@ export class AtUri {
   }
 
   toString(): AtUriString {
-    let path = this.pathname || '/'
-    if (!path.startsWith('/')) {
-      path = `/${path}`
+    let pathname = this.pathname
+    if (pathname && !pathname.startsWith('/')) {
+      pathname = `/${pathname}`
+    }
+    while (pathname.endsWith('/')) {
+      pathname = pathname.slice(0, -1)
     }
     let qs = ''
     if (this.searchParams.size) {
       qs = `?${this.searchParams.toString()}`
     }
-    let hash = this.hash
-    if (hash && !hash.startsWith('#')) {
-      hash = `#${hash}`
+    // @NOTE We keep the hash as-is, even if it doesn't start with a '/'.
+    let fragment = this.hash
+    if (fragment === '#') {
+      fragment = ''
+    } else if (fragment && !fragment.startsWith('#')) {
+      fragment = `#${fragment}`
     }
-    return `at://${this.host}${path}${qs}${hash}` as AtUriString
+    return `at://${this.host}${pathname}${qs}${fragment}` as AtUriString
   }
 }
 

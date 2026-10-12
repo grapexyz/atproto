@@ -1,18 +1,21 @@
 import { mapDefined } from '@atproto/common'
-import { DidString } from '@atproto/lex'
-import { Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
-import { HydrateCtx, Hydrator } from '../../../../hydration/hydrator'
+import type { DidString } from '@atproto/lex'
+import type { Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
+import type {
+  HydrateCtxWithViewer,
+  Hydrator,
+} from '../../../../hydration/hydrator.js'
 import { app } from '../../../../lexicons/index.js'
 import {
-  HydrationFnInput,
-  PresentationFnInput,
-  SkeletonFnInput,
+  type HydrationFnInput,
+  type PresentationFnInput,
+  type SkeletonFnInput,
   createPipeline,
   noRules,
-} from '../../../../pipeline'
-import { Views } from '../../../../views'
-import { clearlyBadCursor, resHeaders } from '../../../util'
+} from '../../../../pipeline.js'
+import type { Views } from '../../../../views/index.js'
+import { clearlyBadCursor, fillPage, resHeaders } from '../../../util.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getMutes = createPipeline(skeleton, hydration, noRules, presentation)
@@ -22,10 +25,13 @@ export default function (server: Server, ctx: AppContext) {
       const viewer = auth.credentials.iss
       const labelers = ctx.reqLabelers(req)
       const hydrateCtx = await ctx.hydrator.createContext({ labelers, viewer })
-      const result = await getMutes(
-        { ...params, hydrateCtx: hydrateCtx.copy({ viewer }) },
-        ctx,
-      )
+      const result = await fillPage({
+        cursor: params.cursor,
+        limit: params.limit,
+        fetch: ({ cursor, limit }) =>
+          getMutes({ ...params, cursor, limit, hydrateCtx }, ctx),
+        items: (r) => r.mutes,
+      })
       return {
         encoding: 'application/json',
         body: result,
@@ -42,14 +48,22 @@ const skeleton = async (
   if (clearlyBadCursor(params.cursor)) {
     return { mutedDids: [] }
   }
-  const { dids, cursor } = await ctx.hydrator.dataplane.getMutes({
+  const res = await ctx.hydrator.dataplane.getMutes({
     actorDid: params.hydrateCtx.viewer,
     cursor: params.cursor,
     limit: params.limit,
   })
+
+  // only fully muted accounts are enumerated: scoped mutes (only reposts /
+  // only quoteposts) are filtered out.
+  const mutedDids = res.mutes.length
+    ? res.mutes
+        .filter((mute) => !mute.onlyReposts && !mute.onlyQuoteposts)
+        .map((mute) => mute.did)
+    : res.dids
   return {
-    mutedDids: dids as DidString[],
-    cursor: cursor || undefined,
+    mutedDids: mutedDids as DidString[],
+    cursor: res.cursor,
   }
 }
 
@@ -78,7 +92,7 @@ type Context = {
 }
 
 type Params = app.bsky.graph.getMutes.$Params & {
-  hydrateCtx: HydrateCtx & { viewer: string }
+  hydrateCtx: HydrateCtxWithViewer
 }
 
 type SkeletonState = {

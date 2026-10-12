@@ -1,5 +1,385 @@
 # @atproto/xrpc-server
 
+## 0.13.4
+
+### Patch Changes
+
+- Updated dependencies [[`f8ed258`](https://github.com/bluesky-social/atproto/commit/f8ed25853dc91a16639decfaee2e0dcbb60808cd), [`e8b89ff`](https://github.com/bluesky-social/atproto/commit/e8b89ff4c211a10519b54bd83eb64950035942c3)]:
+  - @atproto/crypto@0.5.7
+  - @atproto/lex-data@0.1.8
+  - @atproto/lexicon@0.7.16
+  - @atproto/common@0.8.5
+  - @atproto/lex-cbor@0.1.7
+  - @atproto/lex-client@0.3.7
+  - @atproto/lex-json@0.1.7
+  - @atproto/lex-schema@0.2.8
+  - @atproto/xrpc@0.8.15
+
+## 0.13.3
+
+### Patch Changes
+
+- [#5556](https://github.com/bluesky-social/atproto/pull/5556) [`5019f55`](https://github.com/bluesky-social/atproto/commit/5019f5537317ee75ad4527db212bc27c3085fe67) Thanks [@dependabot](https://github.com/apps/dependabot)! - build(deps-dev): bump the dev-dependencies group across 1 directory with 25 updates
+- Updated dependencies [[`5019f55`](https://github.com/bluesky-social/atproto/commit/5019f5537317ee75ad4527db212bc27c3085fe67)]:
+  - @atproto/crypto@0.5.6
+  - @atproto/lexicon@0.7.15
+  - @atproto/common@0.8.4
+  - @atproto/xrpc@0.8.14
+
+## 0.13.2
+
+### Patch Changes
+
+- [#5553](https://github.com/bluesky-social/atproto/pull/5553) [`2480187`](https://github.com/bluesky-social/atproto/commit/2480187c9554ff161227480dd6c0bcaf5e7e3921) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Remove `console.error` debug statement
+
+## 0.13.1
+
+### Patch Changes
+
+- [#5488](https://github.com/bluesky-social/atproto/pull/5488) [`fe4087e`](https://github.com/bluesky-social/atproto/commit/fe4087ecb7a7cc53c7081c9f97d49121e5251c36) Thanks [@dependabot](https://github.com/apps/dependabot)! - Bump the dev-dependencies group across 1 directory with 30 updates
+
+- Updated dependencies [[`fe4087e`](https://github.com/bluesky-social/atproto/commit/fe4087ecb7a7cc53c7081c9f97d49121e5251c36)]:
+  - @atproto/crypto@0.5.5
+  - @atproto/lexicon@0.7.14
+  - @atproto/common@0.8.3
+  - @atproto/xrpc@0.8.13
+
+## 0.13.0
+
+### Minor Changes
+
+- [#5457](https://github.com/bluesky-social/atproto/pull/5457) [`ffcb7c5`](https://github.com/bluesky-social/atproto/commit/ffcb7c54e4dcedb10eed9175fbc939761462bca6) Thanks [@treethought](https://github.com/treethought)! - Cancel in-flight query handlers when the client disconnects. Queries now receive an `AbortSignal` on the handler context that fires when the caller hangs up, so upstream work can be aborted instead of held open. This applies to queries, not procedures.
+
+### Patch Changes
+
+- [#5074](https://github.com/bluesky-social/atproto/pull/5074) [`8a4631a`](https://github.com/bluesky-social/atproto/commit/8a4631a47ce6791b3868f06d1c930aa21327748c) Thanks [@foysalit](https://github.com/foysalit)! - Add opt-in prometheus metrics server and opt-in OpenTelemetry tracing (via `@atproto/ozone/tracer`, gated on `OTEL_EXPORTER_OTLP_ENDPOINT`) to ozone; the ozone service image now uses OpenTelemetry instead of dd-trace
+
+- Updated dependencies [[`ed0b7d3`](https://github.com/bluesky-social/atproto/commit/ed0b7d38811bb24952a3f1da988b02e39934d222), [`ed0b7d3`](https://github.com/bluesky-social/atproto/commit/ed0b7d38811bb24952a3f1da988b02e39934d222)]:
+  - @atproto/lex-schema@0.2.7
+  - @atproto/lex-client@0.3.6
+  - @atproto/lexicon@0.7.13
+  - @atproto/common@0.8.2
+  - @atproto/xrpc@0.8.12
+
+## 0.12.7
+
+### Patch Changes
+
+- Updated dependencies [[`ec29fcd`](https://github.com/bluesky-social/atproto/commit/ec29fcdb4e0ce098fb1473feebe876a94b1c8e33)]:
+  - @atproto/lex-client@0.3.5
+
+## 0.12.6
+
+### Patch Changes
+
+- [#5381](https://github.com/bluesky-social/atproto/pull/5381) [`615ac2a`](https://github.com/bluesky-social/atproto/commit/615ac2a8cc72cd475dc4f06f743f2514d8afc6e0) Thanks [@AG0708](https://github.com/AG0708)! - Allow requests with empty chunked transfer encoding when a method expects no input.
+
+- Updated dependencies []:
+  - @atproto/lex-client@0.3.4
+  - @atproto/lex-schema@0.2.6
+  - @atproto/lexicon@0.7.12
+  - @atproto/common@0.8.1
+  - @atproto/xrpc@0.8.11
+
+## 0.12.5
+
+### Patch Changes
+
+- [#5348](https://github.com/bluesky-social/atproto/pull/5348) [`5c3b7c9`](https://github.com/bluesky-social/atproto/commit/5c3b7c9c87efa4d48d41bc55af61f5b1f1e04920) Thanks [@dreyfus92](https://github.com/dreyfus92)! - Remove `key-encoder` dependency (and its `elliptic`/`asn1.js`/`bn.js` transitive tree) in favor of Node's native JWK key import and the already-present `@noble/curves`
+
+## 0.12.4
+
+### Patch Changes
+
+- Updated dependencies [[`898c469`](https://github.com/bluesky-social/atproto/commit/898c469cf568b941f38f9c3371997a513ac05cfa), [`898c469`](https://github.com/bluesky-social/atproto/commit/898c469cf568b941f38f9c3371997a513ac05cfa), [`898c469`](https://github.com/bluesky-social/atproto/commit/898c469cf568b941f38f9c3371997a513ac05cfa), [`898c469`](https://github.com/bluesky-social/atproto/commit/898c469cf568b941f38f9c3371997a513ac05cfa), [`898c469`](https://github.com/bluesky-social/atproto/commit/898c469cf568b941f38f9c3371997a513ac05cfa), [`898c469`](https://github.com/bluesky-social/atproto/commit/898c469cf568b941f38f9c3371997a513ac05cfa), [`898c469`](https://github.com/bluesky-social/atproto/commit/898c469cf568b941f38f9c3371997a513ac05cfa)]:
+  - @atproto/common@0.8.0
+
+## 0.12.3
+
+### Patch Changes
+
+- Updated dependencies [[`aadb103`](https://github.com/bluesky-social/atproto/commit/aadb10349497d7c6b6ce5641dbbb1fd940dd5b12)]:
+  - @atproto/ws-client@0.2.1
+
+## 0.12.2
+
+### Patch Changes
+
+- Updated dependencies [[`b66870d`](https://github.com/bluesky-social/atproto/commit/b66870d5a1efbcfa0cc07498c7cfcf3f0f243e86), [`b66870d`](https://github.com/bluesky-social/atproto/commit/b66870d5a1efbcfa0cc07498c7cfcf3f0f243e86)]:
+  - @atproto/common@0.7.6
+
+## 0.12.1
+
+### Patch Changes
+
+- Updated dependencies [[`8b55a4a`](https://github.com/bluesky-social/atproto/commit/8b55a4ab69c24e5038f67c479b3b9953666ea0c2)]:
+  - @atproto/lex-schema@0.2.5
+  - @atproto/lexicon@0.7.11
+  - @atproto/lex-client@0.3.3
+  - @atproto/common@0.7.5
+  - @atproto/xrpc@0.8.10
+
+## 0.12.0
+
+### Minor Changes
+
+- [#5285](https://github.com/bluesky-social/atproto/pull/5285) [`d12f6ac`](https://github.com/bluesky-social/atproto/commit/d12f6ac6e2cb2590446bf9f2051287bac058c092) Thanks [@devinivy](https://github.com/devinivy)! - **BREAKING:** `Subscription` now takes an explicit set of options rather than arbitrary `ws` `ClientOptions`, and adds a `headers` option for the upgrade request. A subscription also now reconnects on transient close codes (such as a graceful server restart, 1001) where it previously gave up, and `onReconnectError`'s `initialSetup` argument now means "first attempt of this reconnect cycle" rather than "before the first-ever successful connection".
+
+  `DisconnectError` is now defined by this package rather than re-exported from the client: it describes how a server route ends a stream it is serving. Aborting a subscription's `signal` now always rejects the iterator with the abort reason — aborting with a `DisconnectError` no longer ends the stream cleanly. To stop deliberately, abort with a sentinel of your own and rethrow anything else:
+
+  ```ts
+  const doneReason = new Error('done')
+  try {
+    for await (const msg of sub) {
+      /* ... */
+    }
+  } catch (err) {
+    if (err !== doneReason) throw err
+  }
+  ```
+
+### Patch Changes
+
+- [#5302](https://github.com/bluesky-social/atproto/pull/5302) [`5a222b0`](https://github.com/bluesky-social/atproto/commit/5a222b05da5f9c0d32d41fb1c4437ea188aa2c32) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Update mime-types dependency
+
+- [#5301](https://github.com/bluesky-social/atproto/pull/5301) [`8c07338`](https://github.com/bluesky-social/atproto/commit/8c07338232aa69427aa65322a555f70e0211d6d7) Thanks [@43081j](https://github.com/43081j)! - Switch from destructured default imports to named imports of CommonJS dependencies.
+
+- Updated dependencies [[`6a3d607`](https://github.com/bluesky-social/atproto/commit/6a3d6073cb66c527b5b109242049c85c36b9658c), [`8c07338`](https://github.com/bluesky-social/atproto/commit/8c07338232aa69427aa65322a555f70e0211d6d7), [`d12f6ac`](https://github.com/bluesky-social/atproto/commit/d12f6ac6e2cb2590446bf9f2051287bac058c092)]:
+  - @atproto/lex-client@0.3.2
+  - @atproto/lex-schema@0.2.4
+  - @atproto/lex-cbor@0.1.6
+  - @atproto/lex-data@0.1.7
+  - @atproto/lex-json@0.1.6
+  - @atproto/ws-client@0.2.0
+  - @atproto/common@0.7.4
+  - @atproto/lexicon@0.7.10
+  - @atproto/xrpc@0.8.9
+
+## 0.11.13
+
+### Patch Changes
+
+- [#5282](https://github.com/bluesky-social/atproto/pull/5282) [`c8399b6`](https://github.com/bluesky-social/atproto/commit/c8399b6b051377be66f660105b14646a1c2fa460) Thanks [@cyphercodes](https://github.com/cyphercodes)! - Parse repeated query parameters from the request URL so Express query parser array limits do not collapse XRPC array params above 20 values.
+
+- Updated dependencies [[`95aa1d6`](https://github.com/bluesky-social/atproto/commit/95aa1d6dfea71316d5f30dd8bd4ed48afac31c81)]:
+  - @atproto/lex-client@0.3.1
+  - @atproto/lex-schema@0.2.3
+  - @atproto/lex-cbor@0.1.5
+  - @atproto/lex-data@0.1.6
+  - @atproto/lex-json@0.1.5
+  - @atproto/common@0.7.3
+  - @atproto/ws-client@0.1.8
+  - @atproto/lexicon@0.7.9
+  - @atproto/xrpc@0.8.8
+
+## 0.11.12
+
+### Patch Changes
+
+- Updated dependencies [[`d3bbeb5`](https://github.com/bluesky-social/atproto/commit/d3bbeb5fe87f8c389c2f18abd2bc055ef916a63a)]:
+  - @atproto/lexicon@0.7.8
+  - @atproto/xrpc@0.8.7
+
+## 0.11.11
+
+### Patch Changes
+
+- [#5231](https://github.com/bluesky-social/atproto/pull/5231) [`3358df6`](https://github.com/bluesky-social/atproto/commit/3358df61caab20c4258ea7673121a03236993d7b) Thanks [@fatfingers23](https://github.com/fatfingers23)! - Add the rate limit response headers `RateLimit-Limit`, `RateLimit-Reset`, `RateLimit-Remaining`, `RateLimit-Policy`, and `Retry-After` on 429s to `Access-Control-Expose-Headers` so browser clients can read them on cross-origin requests.
+
+## 0.11.10
+
+### Patch Changes
+
+- Updated dependencies [[`f8267c3`](https://github.com/bluesky-social/atproto/commit/f8267c3ada1645a2472c81c1ba95157466108b6e)]:
+  - @atproto/lex-client@0.3.0
+
+## 0.11.9
+
+### Patch Changes
+
+- Updated dependencies [[`1570e44`](https://github.com/bluesky-social/atproto/commit/1570e4471bffb1f3e5e6907f031d025db9ef3198)]:
+  - @atproto/lex-schema@0.2.2
+  - @atproto/lexicon@0.7.7
+  - @atproto/lex-client@0.2.4
+  - @atproto/common@0.7.2
+  - @atproto/xrpc@0.8.6
+  - @atproto/ws-client@0.1.7
+
+## 0.11.8
+
+### Patch Changes
+
+- [#5197](https://github.com/bluesky-social/atproto/pull/5197) [`a0c49d9`](https://github.com/bluesky-social/atproto/commit/a0c49d9e8bc685c5a747a8d3b2775c73c63fdb6f) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Rewrite import statements to be compatible with TypeScript's `verbatimModuleSyntax` config.
+
+- Updated dependencies [[`a0c49d9`](https://github.com/bluesky-social/atproto/commit/a0c49d9e8bc685c5a747a8d3b2775c73c63fdb6f), [`cc6b901`](https://github.com/bluesky-social/atproto/commit/cc6b901496f607c0b477e48a23c94e6f727396c9), [`cc6b901`](https://github.com/bluesky-social/atproto/commit/cc6b901496f607c0b477e48a23c94e6f727396c9), [`cc6b901`](https://github.com/bluesky-social/atproto/commit/cc6b901496f607c0b477e48a23c94e6f727396c9), [`cc6b901`](https://github.com/bluesky-social/atproto/commit/cc6b901496f607c0b477e48a23c94e6f727396c9)]:
+  - @atproto/lex-client@0.2.3
+  - @atproto/lex-schema@0.2.1
+  - @atproto/lex-cbor@0.1.4
+  - @atproto/lex-data@0.1.5
+  - @atproto/lex-json@0.1.4
+  - @atproto/ws-client@0.1.6
+  - @atproto/lexicon@0.7.6
+  - @atproto/common@0.7.1
+  - @atproto/crypto@0.5.4
+  - @atproto/xrpc@0.8.5
+
+## 0.11.7
+
+### Patch Changes
+
+- [#5158](https://github.com/bluesky-social/atproto/pull/5158) [`963b944`](https://github.com/bluesky-social/atproto/commit/963b9440190c7e59abc0c05de70ecea9cab6fe37) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Add `Retry-After` header to rate limited responses
+
+- Updated dependencies [[`963b944`](https://github.com/bluesky-social/atproto/commit/963b9440190c7e59abc0c05de70ecea9cab6fe37), [`d1be0ce`](https://github.com/bluesky-social/atproto/commit/d1be0cead444ef95e64cac5ea5318edbec9d8112), [`963b944`](https://github.com/bluesky-social/atproto/commit/963b9440190c7e59abc0c05de70ecea9cab6fe37)]:
+  - @atproto/lex-client@0.2.2
+  - @atproto/common@0.7.0
+  - @atproto/lex-schema@0.2.0
+  - @atproto/lexicon@0.7.5
+  - @atproto/ws-client@0.1.5
+  - @atproto/xrpc@0.8.4
+
+## 0.11.6
+
+### Patch Changes
+
+- [#5099](https://github.com/bluesky-social/atproto/pull/5099) [`b43ec31`](https://github.com/bluesky-social/atproto/commit/b43ec31f247f4461725b01226885f88bd430ca07) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Update TypeScript build to rely on references to composite internal projects
+
+- [#5099](https://github.com/bluesky-social/atproto/pull/5099) [`b43ec31`](https://github.com/bluesky-social/atproto/commit/b43ec31f247f4461725b01226885f88bd430ca07) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Bundle only necessary files in the NPM tarball, including the `CHANGELOG.md` and `README.md` files (if present).
+
+- Updated dependencies [[`b43ec31`](https://github.com/bluesky-social/atproto/commit/b43ec31f247f4461725b01226885f88bd430ca07), [`b43ec31`](https://github.com/bluesky-social/atproto/commit/b43ec31f247f4461725b01226885f88bd430ca07), [`b43ec31`](https://github.com/bluesky-social/atproto/commit/b43ec31f247f4461725b01226885f88bd430ca07), [`b43ec31`](https://github.com/bluesky-social/atproto/commit/b43ec31f247f4461725b01226885f88bd430ca07)]:
+  - @atproto/lex-client@0.2.1
+  - @atproto/lex-schema@0.1.6
+  - @atproto/lex-cbor@0.1.3
+  - @atproto/lex-data@0.1.4
+  - @atproto/lex-json@0.1.3
+  - @atproto/ws-client@0.1.4
+  - @atproto/lexicon@0.7.4
+  - @atproto/common@0.6.5
+  - @atproto/crypto@0.5.3
+  - @atproto/xrpc@0.8.3
+
+## 0.11.5
+
+### Patch Changes
+
+- Updated dependencies [[`8bcba69`](https://github.com/bluesky-social/atproto/commit/8bcba69cf1f02d09e07b51ce091918312029df63), [`8bcba69`](https://github.com/bluesky-social/atproto/commit/8bcba69cf1f02d09e07b51ce091918312029df63)]:
+  - @atproto/lex-client@0.2.0
+
+## 0.11.4
+
+### Patch Changes
+
+- [#5156](https://github.com/bluesky-social/atproto/pull/5156) [`f2a0efe`](https://github.com/bluesky-social/atproto/commit/f2a0efe11140c8bebe488ac1f737e242d7f23f0b) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Add more details to the xrpc-server log errors
+
+- [#5156](https://github.com/bluesky-social/atproto/pull/5156) [`f2a0efe`](https://github.com/bluesky-social/atproto/commit/f2a0efe11140c8bebe488ac1f737e242d7f23f0b) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Add explicit error message when using invalid HTTP verb with xrpc methods defined using `.add()`
+
+## 0.11.3
+
+### Patch Changes
+
+- [#5151](https://github.com/bluesky-social/atproto/pull/5151) [`a51c45d`](https://github.com/bluesky-social/atproto/commit/a51c45d38f6bd7b8765f640e564cf921d52162e7) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Update dependencies
+
+- Updated dependencies [[`f2cf8f7`](https://github.com/bluesky-social/atproto/commit/f2cf8f7fc5f3a10847f2e6d785e5fa2244ee8cfb), [`a51c45d`](https://github.com/bluesky-social/atproto/commit/a51c45d38f6bd7b8765f640e564cf921d52162e7), [`f2cf8f7`](https://github.com/bluesky-social/atproto/commit/f2cf8f7fc5f3a10847f2e6d785e5fa2244ee8cfb)]:
+  - @atproto/common@0.6.4
+  - @atproto/crypto@0.5.2
+  - @atproto/lex-cbor@0.1.2
+  - @atproto/lex-client@0.1.5
+  - @atproto/lex-data@0.1.3
+  - @atproto/lex-json@0.1.2
+  - @atproto/lex-schema@0.1.5
+  - @atproto/lexicon@0.7.3
+  - @atproto/ws-client@0.1.3
+  - @atproto/xrpc@0.8.2
+
+## 0.11.2
+
+### Patch Changes
+
+- [#4967](https://github.com/bluesky-social/atproto/pull/4967) [`9fc720c`](https://github.com/bluesky-social/atproto/commit/9fc720ce75f3ee88a5e48a9be919b07c7647f6f5) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Use TypeScript 7 to build package
+
+- Updated dependencies [[`9fc720c`](https://github.com/bluesky-social/atproto/commit/9fc720ce75f3ee88a5e48a9be919b07c7647f6f5)]:
+  - @atproto/lex-client@0.1.4
+  - @atproto/lex-schema@0.1.4
+  - @atproto/lex-cbor@0.1.1
+  - @atproto/lex-data@0.1.2
+  - @atproto/lex-json@0.1.1
+  - @atproto/ws-client@0.1.1
+  - @atproto/lexicon@0.7.2
+  - @atproto/common@0.6.3
+  - @atproto/crypto@0.5.1
+  - @atproto/xrpc@0.8.1
+
+## 0.11.1
+
+### Patch Changes
+
+- [#4969](https://github.com/bluesky-social/atproto/pull/4969) [`57ecbda`](https://github.com/bluesky-social/atproto/commit/57ecbdac3eb14fdbc853456371e84a5098e91c4b) Thanks [@matthieusieben](https://github.com/matthieusieben)! - Uses the http res's log Pino logger upon rate limit computation error, allowing to log the failure in the context of an http request
+
+- Updated dependencies [[`482767c`](https://github.com/bluesky-social/atproto/commit/482767c4bcce95aa390b2992b028fd8e27d162b2)]:
+  - @atproto/lex-client@0.1.2
+
+## 0.11.0
+
+### Minor Changes
+
+- [#4929](https://github.com/bluesky-social/atproto/pull/4929) [`f01c59f`](https://github.com/bluesky-social/atproto/commit/f01c59f5bd3f75fb8b47a9eecd4858b84033fb7c) Thanks [@devinivy](https://github.com/devinivy)! - **BREAKING:** Drop support for Node.js 18 and 20. Node.js 22 is now the minimum supported version. Docker images now use Node.js 24.
+
+- [#4943](https://github.com/bluesky-social/atproto/pull/4943) [`c459153`](https://github.com/bluesky-social/atproto/commit/c459153395a30ce89e050892c8fab7dc98e019b9) Thanks [@devinivy](https://github.com/devinivy)! - **BREAKING:** Convert to pure ESM. All packages now ship `"type": "module"` with ES module output and Node16 module resolution.
+
+  Node.js 22's `require()` compatibility layer can still load these packages in CommonJS code.
+
+- [#4930](https://github.com/bluesky-social/atproto/pull/4930) [`908bece`](https://github.com/bluesky-social/atproto/commit/908bece169258bff5ad121e5eec157d6ded6f705) Thanks [@devinivy](https://github.com/devinivy)! - Build with TypeScript 6.0.
+
+### Patch Changes
+
+- Updated dependencies [[`affb50c`](https://github.com/bluesky-social/atproto/commit/affb50c040b497a12631df99a6310f8e78cab557), [`f01c59f`](https://github.com/bluesky-social/atproto/commit/f01c59f5bd3f75fb8b47a9eecd4858b84033fb7c), [`c459153`](https://github.com/bluesky-social/atproto/commit/c459153395a30ce89e050892c8fab7dc98e019b9), [`affb50c`](https://github.com/bluesky-social/atproto/commit/affb50c040b497a12631df99a6310f8e78cab557), [`908bece`](https://github.com/bluesky-social/atproto/commit/908bece169258bff5ad121e5eec157d6ded6f705)]:
+  - @atproto/common@0.6.0
+  - @atproto/crypto@0.5.0
+  - @atproto/lex-cbor@0.1.0
+  - @atproto/lex-client@0.1.0
+  - @atproto/lex-data@0.1.0
+  - @atproto/lex-json@0.1.0
+  - @atproto/lex-schema@0.1.0
+  - @atproto/lexicon@0.7.0
+  - @atproto/ws-client@0.1.0
+  - @atproto/xrpc@0.8.0
+
+## 0.10.22
+
+### Patch Changes
+
+- Updated dependencies [[`d8b2374`](https://github.com/bluesky-social/atproto/commit/d8b2374e1592d1dec65a33439791bc141f02397a)]:
+  - @atproto/lex-client@0.0.22
+
+## 0.10.21
+
+### Patch Changes
+
+- Updated dependencies [[`2fd8d62`](https://github.com/bluesky-social/atproto/commit/2fd8d62708dc23de6ed21cbcccfebab68b19f588), [`907edfa`](https://github.com/bluesky-social/atproto/commit/907edfa1d16b1074bab4dc617d0bd1a810f3da02)]:
+  - @atproto/lex-schema@0.0.20
+  - @atproto/lex-client@0.0.21
+
+## 0.10.20
+
+### Patch Changes
+
+- Updated dependencies [[`61e75af`](https://github.com/bluesky-social/atproto/commit/61e75af39e63217d915850b2f8ac8db5f92eed0b), [`26d793a`](https://github.com/bluesky-social/atproto/commit/26d793af95a6fb3a50f9b2a97187d8ac4fecf676), [`952354c`](https://github.com/bluesky-social/atproto/commit/952354c1dd458251f8b643d02f4b227d40c5df17)]:
+  - @atproto/lex-client@0.0.20
+  - @atproto/lex-schema@0.0.19
+  - @atproto/lex-json@0.0.16
+  - @atproto/lex-cbor@0.0.16
+
+## 0.10.19
+
+### Patch Changes
+
+- Updated dependencies [[`c62651d`](https://github.com/bluesky-social/atproto/commit/c62651dd69f1e18bd854b66e499b91fee9eaa856), [`f6f100c`](https://github.com/bluesky-social/atproto/commit/f6f100c33700a7ff58a1458109cc7420131feed0), [`b6b231f`](https://github.com/bluesky-social/atproto/commit/b6b231f9c05cf90239d4a29aa0ae2592ea5ce928), [`c62651d`](https://github.com/bluesky-social/atproto/commit/c62651dd69f1e18bd854b66e499b91fee9eaa856), [`c62651d`](https://github.com/bluesky-social/atproto/commit/c62651dd69f1e18bd854b66e499b91fee9eaa856), [`f6f100c`](https://github.com/bluesky-social/atproto/commit/f6f100c33700a7ff58a1458109cc7420131feed0), [`f6f100c`](https://github.com/bluesky-social/atproto/commit/f6f100c33700a7ff58a1458109cc7420131feed0)]:
+  - @atproto/lex-data@0.0.15
+  - @atproto/lex-client@0.0.19
+  - @atproto/lex-schema@0.0.18
+  - @atproto/lex-json@0.0.15
+  - @atproto/common@0.5.16
+  - @atproto/lex-cbor@0.0.16
+
 ## 0.10.18
 
 ### Patch Changes

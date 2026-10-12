@@ -1,11 +1,10 @@
-import type { ClientOptions } from 'ws'
-import { Deferrable, createDeferrable, wait } from '@atproto/common'
+import { type Deferrable, createDeferrable, wait } from '@atproto/common'
 import {
-  DidDocument,
-  IdResolver,
+  type DidDocument,
+  type IdResolver,
   parseToAtprotoDocument,
 } from '@atproto/identity'
-import { Cid } from '@atproto/lex'
+import type { Cid } from '@atproto/lex'
 import {
   RepoVerificationError,
   cborToLexRecord,
@@ -16,8 +15,8 @@ import {
   verifyProofs,
 } from '@atproto/repo'
 import { AtUri } from '@atproto/syntax'
-import { Subscription } from '@atproto/xrpc-server'
-import {
+import { type HeadersInit, Subscription } from '@atproto/xrpc-server'
+import type {
   AccountEvt,
   AccountStatus,
   CommitEvt,
@@ -25,22 +24,28 @@ import {
   Event,
   IdentityEvt,
   SyncEvt,
-} from '../events'
+} from '../events.js'
 import { com } from '../lexicons/index.js'
-import { EventRunner } from '../runner'
-import { didAndSeqForEvt } from '../util'
+import type { EventRunner } from '../runner/index.js'
+import { didAndSeqForEvt } from '../util.js'
 
-export type FirehoseOptions = ClientOptions & {
+export type FirehoseOptions = {
   idResolver: IdResolver
 
-  handleEvent: (evt: Event) => Awaited<void>
+  handleEvent: (evt: Event) => void | Promise<void>
   onError: (err: Error) => void
-  getCursor?: () => Awaited<number | undefined>
+  getCursor?: () => number | undefined | Promise<number | undefined>
 
   runner?: EventRunner // should only set getCursor *or* runner
 
   service?: string
   subscriptionReconnectDelay?: number
+  /** Exponential-backoff ceiling for reconnects, in seconds. */
+  maxReconnectSeconds?: number
+  /** Heartbeat interval; omit to use the default. */
+  heartbeatIntervalMs?: number
+  /** Applied to the connection's upgrade request (Node.js only). */
+  headers?: HeadersInit
 
   unauthenticatedCommits?: boolean
   unauthenticatedHandles?: boolean
@@ -83,19 +88,24 @@ export class Firehose {
         return false
       }
     }
+    // Listed explicitly rather than spread: the old `ClientOptions &` shape let
+    // arbitrary `ws` options through, which Subscription no longer accepts — a
+    // spread would silently drop them.
     this.sub = new Subscription({
-      ...opts,
       service: opts.service ?? 'wss://bsky.network',
       method: com.atproto.sync.subscribeRepos.$lxm,
+      maxReconnectSeconds: opts.maxReconnectSeconds,
+      heartbeatIntervalMs: opts.heartbeatIntervalMs,
+      headers: opts.headers,
       signal: this.abortController.signal,
       getParams: async () => {
-        const getCursorFn = () =>
-          this.opts.runner?.getCursor() ?? this.opts.getCursor
-        if (!getCursorFn) {
-          return undefined
+        let cursor: number | undefined
+        if (this.opts.runner) {
+          cursor = await this.opts.runner.getCursor()
+        } else if (this.opts.getCursor) {
+          cursor = await this.opts.getCursor()
         }
-        const cursor = await getCursorFn()
-        return { cursor }
+        return cursor === undefined ? undefined : { cursor }
       },
       validate: (value: unknown) => {
         const result = com.atproto.sync.subscribeRepos.$message.safeParse(value)
@@ -108,7 +118,7 @@ export class Firehose {
     })
   }
 
-  async start() {
+  async start(): Promise<void> {
     try {
       for await (const evt of this.sub) {
         if (this.opts.runner) {
@@ -131,7 +141,7 @@ export class Firehose {
         }
       }
     } catch (err) {
-      if (err && err['name'] === 'AbortError') {
+      if ((err as any)?.name === 'AbortError') {
         this.destoryDefer.resolve()
         return
       }

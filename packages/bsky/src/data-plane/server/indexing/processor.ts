@@ -1,11 +1,17 @@
-import { Insertable } from 'kysely'
+import type { Insertable } from 'kysely'
 import { chunkArray } from '@atproto/common'
-import { Cid, l, lexParse, lexStringify, parseCid } from '@atproto/lex'
+import {
+  type Cid,
+  type l,
+  lexParse,
+  lexStringify,
+  parseCid,
+} from '@atproto/lex'
 import { AtUri } from '@atproto/syntax'
-import { BackgroundQueue } from '../background'
-import { Database } from '../db'
-import { DatabaseSchema } from '../db/database-schema'
-import { Notification } from '../db/tables/notification'
+import type { BackgroundQueue } from '../background.js'
+import type { DatabaseSchema } from '../db/database-schema.js'
+import type { Database } from '../db/index.js'
+import type { Notification } from '../db/tables/notification.js'
 
 // @NOTE re: insertions and deletions. Due to how record updates are handled,
 // (insertFn) should have the same effect as (insertFn -> deleteFn -> insertFn).
@@ -30,6 +36,7 @@ type RecordProcessorOptions<TSchema extends l.RecordSchema, TRow> = {
     replacedBy: TRow | null,
   ) => { notifs: Notif[]; toDelete: string[] }
   updateAggregates?: (db: DatabaseSchema, obj: TRow) => Promise<void>
+  promoteDuplicateOnDelete?: boolean
 }
 
 type Notif = Insertable<Notification>
@@ -37,7 +44,7 @@ type Notif = Insertable<Notification>
 export class RecordProcessor<TSchema extends l.RecordSchema, TRow> {
   constructor(
     private appDb: Database,
-    private background: BackgroundQueue,
+    private background: BackgroundQueue<Database>,
     private options: RecordProcessorOptions<TSchema, TRow>,
   ) {}
 
@@ -189,6 +196,9 @@ export class RecordProcessor<TSchema extends l.RecordSchema, TRow> {
         .execute()
       return this.handleNotifs({ deleted })
     } else {
+      if (this.options.promoteDuplicateOnDelete === false) {
+        return this.handleNotifs({ deleted })
+      }
       const found = await this.db
         .selectFrom('duplicate_record')
         .innerJoin('record', 'record.uri', 'duplicate_record.uri')

@@ -1,40 +1,48 @@
 import { mapDefined } from '@atproto/common'
-import { AtUriString, DidString } from '@atproto/lex'
-import { InvalidRequestError, Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
+import type { AtUriString, DidString } from '@atproto/lex'
+import { InvalidRequestError, type Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
 import {
-  HydrateCtx,
-  HydrationState,
-  Hydrator,
+  type HydrateCtx,
+  type HydrationState,
+  type Hydrator,
   mergeManyStates,
-} from '../../../../hydration/hydrator'
+} from '../../../../hydration/hydrator.js'
 import { app } from '../../../../lexicons/index.js'
 import {
-  HydrationFnInput,
-  PresentationFnInput,
-  RulesFnInput,
-  SkeletonFnInput,
+  type HydrationFnInput,
+  type PresentationFnInput,
+  type RulesFnInput,
+  type SkeletonFnInput,
   createPipeline,
-} from '../../../../pipeline'
-import { ListItemInfo } from '../../../../proto/bsky_pb'
-import { uriToDid as didFromUri } from '../../../../util/uris'
-import { Views } from '../../../../views'
-import { clearlyBadCursor, resHeaders } from '../../../util'
+} from '../../../../pipeline.js'
+import type { ListItemInfo } from '../../../../proto/bsky_pb.js'
+import { uriToDid as didFromUri } from '../../../../util/uris.js'
+import type { Views } from '../../../../views/index.js'
+import { clearlyBadCursor, fillPage, resHeaders } from '../../../util.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getList = createPipeline(skeleton, hydration, noBlocks, presentation)
   server.add(app.bsky.graph.getList, {
     auth: ctx.authVerifier.standardOptional,
     handler: async ({ params, auth, req }) => {
-      const { viewer, includeTakedowns } = ctx.authVerifier.parseCreds(auth)
+      const { viewer, includeTakedowns, skipViewerBlocks } =
+        ctx.authVerifier.parseCreds(auth)
 
       const labelers = ctx.reqLabelers(req)
       const hydrateCtx = await ctx.hydrator.createContext({
         labelers,
         viewer,
         includeTakedowns,
+        skipViewerBlocks,
       })
-      const result = await getList({ ...params, hydrateCtx }, ctx)
+      const result = await fillPage({
+        cursor: params.cursor,
+        limit: params.limit,
+        fetch: ({ cursor, limit }) =>
+          getList({ ...params, cursor, limit, hydrateCtx }, ctx),
+        items: (r) => r.items,
+      })
       return {
         encoding: 'application/json',
         body: result,
@@ -55,11 +63,12 @@ const skeleton = async (
     listUri: params.list,
     limit: params.limit,
     cursor: params.cursor,
+    viewerDid: params.hydrateCtx.viewer ?? undefined,
   })
   return {
     listUri: params.list,
     listitems,
-    cursor: cursor || undefined,
+    cursor,
   }
 }
 
@@ -100,12 +109,20 @@ const presentation = (
   const { ctx, skeleton, hydration } = input
   const { listUri, listitems, cursor } = skeleton
   const list = ctx.views.list(listUri, hydration)
-  const items = mapDefined(listitems, ({ uri, did }) =>
-    ctx.views.listItemView(uri as AtUriString, did as DidString, hydration),
-  )
   if (!list) {
     throw new InvalidRequestError('List not found')
   }
+  const showOptOuts =
+    hydration.ctx?.viewer === didFromUri(listUri) &&
+    list.purpose === app.bsky.graph.defs.Referencelist
+  const items = mapDefined(listitems, ({ uri, did, subjectOptedOut }) =>
+    ctx.views.listItemView(
+      uri as AtUriString,
+      did as DidString,
+      hydration,
+      showOptOuts && subjectOptedOut,
+    ),
+  )
   return { list, items, cursor }
 }
 

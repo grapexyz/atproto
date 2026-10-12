@@ -1,13 +1,13 @@
 import { dedupeStrs } from '@atproto/common'
-import { AtUriString, DidString } from '@atproto/syntax'
-import { DataPlaneClient } from '../data-plane/client'
+import type { AtUriString, DidString } from '@atproto/syntax'
+import type { DataPlaneClient } from '../data-plane/client/index.js'
 import { app } from '../lexicons/index.js'
 import {
   postUriToPostgateUri,
   postUriToThreadgateUri,
   uriToDid as didFromUri,
-} from '../util/uris'
-import {
+} from '../util/uris.js'
+import type {
   FeedGenRecord,
   GateRecord,
   LikeRecord,
@@ -17,18 +17,20 @@ import {
 } from '../views/types.js'
 import {
   HydrationMap,
-  ItemRef,
-  RecordInfo,
+  type ItemRef,
+  type RecordInfo,
   parseRecord,
   parseString,
   split,
-} from './util'
+} from './util.js'
 
 export type Post = RecordInfo<PostRecord> & {
   violatesThreadGate: boolean
   violatesEmbeddingRules: boolean
   hasThreadGate: boolean
   hasPostGate: boolean
+  opThreadPostIndex?: number
+  opThreadPostCount?: number
   tags: Set<string>
   /**
    * Debug information for internal development
@@ -100,8 +102,7 @@ export type FeedItem = {
   post: ItemRef
   repost?: ItemRef
   /**
-   * If true, overrides the `reason` with `app.bsky.feed.defs#reasonPin`. Used
-   * only in author feeds.
+   * If true, overrides the `reason` with `app.bsky.feed.defs#reasonPin`.
    */
   authorPinned?: boolean
 }
@@ -134,11 +135,23 @@ export class FeedHydrator {
               uris: need,
               viewerDid: viewer ?? undefined,
               processDynamicTagsForView: options.processDynamicTagsForView,
+              includeOpThreadMetadata: true,
             }
           : {
               uris: need,
+              includeOpThreadMetadata: true,
             },
       )
+      const opThreadMetadata = new Map<
+        string,
+        { index: number; count: number }
+      >()
+      for (const { uris } of res.opThreads) {
+        const count = uris.length
+        for (let i = 0; i < count; i++) {
+          opThreadMetadata.set(uris[i], { index: i + 1, count })
+        }
+      }
 
       for (let i = 0; i < need.length; i++) {
         const record = parseRecord(
@@ -150,6 +163,7 @@ export class FeedHydrator {
         const violatesEmbeddingRules = res.meta[i].violatesEmbeddingRules
         const hasThreadGate = res.meta[i].hasThreadGate
         const hasPostGate = res.meta[i].hasPostGate
+        const opThread = opThreadMetadata.get(need[i])
         const tags = new Set<string>(res.records[i].tags ?? [])
         const debug = { tags: Array.from(tags) }
 
@@ -162,6 +176,8 @@ export class FeedHydrator {
                 violatesEmbeddingRules,
                 hasThreadGate,
                 hasPostGate,
+                opThreadPostIndex: opThread?.index,
+                opThreadPostCount: opThread?.count,
                 tags,
                 debug,
               }
@@ -280,7 +296,7 @@ export class FeedHydrator {
     viewer: DidString | null,
   ): Promise<PostAggs> {
     const map: PostAggs = new HydrationMap()
-    if (!refs.length) map
+    if (!refs.length) return map
 
     const counts = await this.dataplane.getInteractionCounts({
       refs,

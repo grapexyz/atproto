@@ -1,0 +1,79 @@
+import {
+  AuthRequiredError,
+  InvalidRequestError,
+  type Server,
+} from '@atproto/xrpc-server'
+import type { AppContext } from '../../context.js'
+import { tools } from '../../lexicons/index.js'
+
+const VALID_SUBJECT_TYPES = ['account', 'record', 'message', 'conversation']
+
+export default function (server: Server, ctx: AppContext) {
+  server.add(tools.ozone.queue.createQueue, {
+    auth: ctx.authVerifier.modOrAdminToken,
+    handler: async ({ input, auth }) => {
+      const access = auth.credentials
+
+      if (!access.isModerator) {
+        throw new AuthRequiredError('Must be a moderator to create a queue')
+      }
+
+      const {
+        name,
+        subjectTypes = [],
+        collection,
+        reportTypes = [],
+        description,
+        recommendedPolicies = [],
+        recommendedLabels = [],
+      } = input.body
+      const createdBy =
+        access.type === 'admin_token' ? 'admin_token' : access.iss
+
+      const invalidTypes = subjectTypes.filter(
+        (t) => !VALID_SUBJECT_TYPES.includes(t),
+      )
+      if (invalidTypes.length > 0) {
+        throw new InvalidRequestError(
+          `Invalid subject types: ${invalidTypes.join(', ')}. Allowed values: ${VALID_SUBJECT_TYPES.join(', ')}`,
+          'InvalidSubjectType',
+        )
+      }
+
+      if (collection && !subjectTypes.includes('record')) {
+        throw new InvalidRequestError(
+          'collection can only be specified when subjectTypes includes "record"',
+          'InvalidCollection',
+        )
+      }
+
+      const queue = await ctx.db.transaction(async (dbTxn) => {
+        const queueService = ctx.queueService(dbTxn)
+        await queueService.assertRecommendedPolicies(recommendedPolicies)
+        await queueService.checkConflict({
+          name,
+          subjectTypes,
+          collection,
+          reportTypes,
+          recommendedLabels,
+        })
+        return queueService.create({
+          name,
+          subjectTypes,
+          collection,
+          reportTypes,
+          description,
+          recommendedPolicies,
+          recommendedLabels,
+          createdBy,
+        })
+      })
+      const queueService = ctx.queueService(ctx.db)
+
+      return {
+        encoding: 'application/json',
+        body: { queue: queueService.view(queue) },
+      }
+    },
+  })
+}

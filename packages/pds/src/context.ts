@@ -1,59 +1,68 @@
 import assert from 'node:assert'
 import * as plc from '@did-plc/lib'
-import express from 'express'
-import { Redis } from 'ioredis'
+import type express from 'express'
+import type { Redis } from 'ioredis'
 import * as nodemailer from 'nodemailer'
 import * as ui8 from 'uint8arrays'
-import * as undici from 'undici'
+import type * as undici from 'undici'
 import { KmsKeypair, S3BlobStore } from '@atproto/aws'
 import * as crypto from '@atproto/crypto'
 import { IdResolver } from '@atproto/identity'
 import { Client } from '@atproto/lex'
+import { parseCid } from '@atproto/lex-data'
 import {
   AccessTokenMode,
   JoseKey,
   LexResolver,
+  LexResolverError,
   OAuthProvider,
-  OAuthVerifier,
-} from '@atproto/oauth-provider'
-import { BlobStore } from '@atproto/repo'
+} from '@atproto/oauth-provider/provider'
+import { OAuthVerifier } from '@atproto/oauth-provider/verifier'
+import type { BlobStoreCreator } from '@atproto/repo'
 import {
   createServiceAuthHeaders,
   createServiceJwt,
 } from '@atproto/xrpc-server'
-import {
-  Fetch,
-  isUnicastIp,
-  safeFetchWrap,
-  unicastLookup,
-} from '@atproto-labs/fetch-node'
-import { AccountManager } from './account-manager/account-manager'
-import { OAuthStore } from './account-manager/oauth-store'
-import { ScopeReferenceGetter } from './account-manager/scope-reference-getter'
-import { ActorStore } from './actor-store/actor-store'
-import { authPassthru, forwardedFor } from './api/proxy'
+import { type Fetch, safeFetchWrap } from '@atproto-labs/fetch-node'
+import { AccountManager } from './account-manager/account-manager.js'
+import { OAuthStore } from './account-manager/oauth-store.js'
+import { ScopeReferenceGetter } from './account-manager/scope-reference-getter.js'
+import { ActorStore } from './actor-store/actor-store.js'
+import { authPassthru, forwardedFor } from './api/proxy.js'
 import {
   AuthVerifier,
   createPublicKeyObject,
   createSecretKeyObject,
-} from './auth-verifier'
-import { BackgroundQueue } from './background'
-import { BskyAppView } from './bsky-app-view'
-import { ServerConfig, ServerSecrets } from './config'
-import { Crawlers } from './crawlers'
-import { DidSqliteCache } from './did-cache'
-import { DiskBlobStore } from './disk-blobstore'
-import { ImageUrlBuilder } from './image/image-url-builder'
-import { fetchLogger, lexiconResolverLogger, oauthLogger } from './logger'
-import { ServerMailer } from './mailer'
-import { ModerationMailer } from './mailer/moderation'
-import { LocalViewer, LocalViewerCreator } from './read-after-write/viewer'
-import { getRedisClient } from './redis'
-import { Sequencer } from './sequencer'
+} from './auth-verifier.js'
+import { BackgroundQueue } from './background.js'
+import { BskyAppView } from './bsky-app-view.js'
+import {
+  type ServerConfig,
+  type ServerEnvironment,
+  type ServerSecrets,
+  envToCfg,
+  envToSecrets,
+  readEnv,
+} from './config/index.js'
+import { Crawlers } from './crawlers.js'
+import { DidSqliteCache } from './did-cache/index.js'
+import { DiskBlobStore } from './disk-blobstore.js'
+import { events } from './events.js'
+import { ImageUrlBuilder } from './image/image-url-builder.js'
+import { fetchLogger, lexiconResolverLogger, oauthLogger } from './logger.js'
+import { ServerMailer } from './mailer/index.js'
+import { ModerationMailer } from './mailer/moderation.js'
+import { buildProxyAgent } from './pipethrough.js'
+import {
+  LocalViewer,
+  type LocalViewerCreator,
+} from './read-after-write/viewer.js'
+import { getRedisClient } from './redis.js'
+import { Sequencer } from './sequencer/index.js'
 
 export type AppContextOptions = {
   actorStore: ActorStore
-  blobstore: (did: string) => BlobStore
+  blobstore: BlobStoreCreator
   localViewer: LocalViewerCreator
   mailer: ServerMailer
   moderationMailer: ModerationMailer
@@ -78,9 +87,9 @@ export type AppContextOptions = {
   cfg: ServerConfig
 }
 
-export class AppContext {
+export class AppContext implements AsyncDisposable {
   public actorStore: ActorStore
-  public blobstore: (did: string) => BlobStore
+  public blobstore: BlobStoreCreator
   public localViewer: LocalViewerCreator
   public mailer: ServerMailer
   public moderationMailer: ModerationMailer
@@ -131,13 +140,25 @@ export class AppContext {
     this.cfg = opts.cfg
   }
 
+  static async fromEnv(
+    env: ServerEnvironment = readEnv(),
+    overrides?: Partial<AppContextOptions>,
+  ): Promise<AppContext> {
+    const cfg = envToCfg(env)
+    const secrets = envToSecrets(env)
+    return AppContext.fromConfig(cfg, secrets, overrides)
+  }
+
   static async fromConfig(
     cfg: ServerConfig,
     secrets: ServerSecrets,
     overrides?: Partial<AppContextOptions>,
   ): Promise<AppContext> {
-    const blobstore =
-      cfg.blobstore.provider === 's3'
+    // @TODO Implement using an AsyncDisposableStack
+
+    const blobstore: BlobStoreCreator =
+      overrides?.blobstore ??
+      (cfg.blobstore.provider === 's3'
         ? S3BlobStore.creator({
             bucket: cfg.blobstore.bucket,
             region: cfg.blobstore.region,
@@ -145,18 +166,24 @@ export class AppContext {
             forcePathStyle: cfg.blobstore.forcePathStyle,
             credentials: cfg.blobstore.credentials,
             uploadTimeoutMs: cfg.blobstore.uploadTimeoutMs,
+            requestTimeoutMs: cfg.blobstore.requestTimeoutMs,
           })
         : DiskBlobStore.creator(
             cfg.blobstore.location,
             cfg.blobstore.tempLocation,
-          )
+          ))
 
     const mailTransport =
       cfg.email !== null
         ? nodemailer.createTransport(cfg.email.smtpUrl)
         : nodemailer.createTransport({ jsonTransport: true })
 
-    const mailer = new ServerMailer(mailTransport, cfg)
+    const mailer = new ServerMailer(
+      mailTransport,
+      cfg.email,
+      cfg.branding,
+      cfg.oauth.issuer,
+    )
 
     const modMailTransport =
       cfg.moderationEmail !== null
@@ -164,6 +191,32 @@ export class AppContext {
         : nodemailer.createTransport({ jsonTransport: true })
 
     const moderationMailer = new ModerationMailer(modMailTransport, cfg)
+
+    /**
+     * A fetch() function that protects against SSRF attacks, large responses &
+     * known bad domains. This function can safely be used to fetch user
+     * provided URLs (unless "disableSsrfProtection" is true, of course).
+     *
+     * @note **DO NOT** wrap `safeFetch` with any logging or other transforms as
+     * this might prevent the use of explicit `redirect: "follow"` init from
+     * working. See {@link safeFetchWrap}.
+     */
+    const safeFetch = safeFetchWrap({
+      allowIpHost: false,
+      allowImplicitRedirect: false,
+      responseMaxSize: cfg.fetch.maxResponseSize,
+      ssrfProtection: !cfg.fetch.disableSsrfProtection,
+
+      fetch: function (input, init) {
+        const method =
+          init?.method ?? (input instanceof Request ? input.method : 'GET')
+        const uri = input instanceof Request ? input.url : String(input)
+
+        fetchLogger.info({ method, uri }, 'fetch')
+
+        return globalThis.fetch.call(this, input, init)
+      },
+    })
 
     const didCache = new DidSqliteCache(
       cfg.db.didCacheDbLoc,
@@ -178,10 +231,11 @@ export class AppContext {
       didCache,
       timeout: cfg.identity.resolverTimeout,
       backupNameservers: cfg.identity.handleBackupNameservers,
+      fetch: safeFetch,
     })
     const plcClient = new plc.Client(cfg.identity.plcUrl)
 
-    const backgroundQueue = new BackgroundQueue()
+    const backgroundQueue = new BackgroundQueue(undefined, { concurrency: 5 })
     const crawlers = new Crawlers(
       backgroundQueue,
       cfg.service.hostname,
@@ -237,14 +291,16 @@ export class AppContext {
     const entrywayAdminClient =
       cfg.entryway && secrets.entrywayAdminToken
         ? new Client(
-            { service: cfg.entryway.url },
             {
+              service: cfg.entryway.url,
               headers: {
                 authorization: basicAuthHeader(
                   'admin',
                   secrets.entrywayAdminToken,
                 ),
               },
+            },
+            {
               // Trust internal services to send us well-formed responses
               strictResponseProcessing: false,
               validateResponse: cfg.service.devMode,
@@ -267,23 +323,114 @@ export class AppContext {
       backgroundQueue,
     })
 
-    const accountManager = new AccountManager(
-      idResolver,
-      jwtSecretKey,
-      cfg.service.did,
-      cfg.identity.serviceHandleDomains,
-      cfg.db,
-    )
-    await accountManager.migrateOrThrow()
-
     const plcRotationKey =
-      secrets.plcRotationKey.provider === 'kms'
+      overrides?.plcRotationKey ??
+      (secrets.plcRotationKey?.provider === 'kms'
         ? await KmsKeypair.load({
             keyId: secrets.plcRotationKey.keyId,
           })
-        : await crypto.Secp256k1Keypair.import(
-            secrets.plcRotationKey.privateKeyHex,
+        : secrets.plcRotationKey?.provider === 'memory'
+          ? await crypto.Secp256k1Keypair.import(
+              secrets.plcRotationKey.privateKeyHex,
+            )
+          : undefined)
+
+    if (!plcRotationKey) {
+      throw new Error('Must configure plc rotation key')
+    }
+
+    const accountManager = new AccountManager(
+      cfg,
+      actorStore,
+      idResolver,
+      jwtSecretKey,
+      mailer,
+      sequencer,
+      plcClient,
+      plcRotationKey,
+    )
+    await accountManager.migrateOrThrow()
+
+    // @TODO Use this lexResolver instance to implement validation of records
+    // created with the "validate" option. Before doing so, ensure that 1) a
+    // didCache is provided, and 2) that nsid->lexicon are cached.
+    const lexResolver = new LexResolver({
+      fetch: safeFetch,
+      didCache: undefined, // @TODO provide a dedicated cache
+      plcDirectoryUrl: cfg.identity.plcUrl,
+      hooks: {
+        // @NOTE Lexicons hosted by this PDS are read straight from the
+        // actor store. Fetching them over the network would require this
+        // server to reach its own public endpoint, which is not
+        // guaranteed to work (SSRF protection, missing NAT hairpin,
+        // internal reverse proxies, ...).
+        onFetch: async ({ uri, did, nsid, signal }) => {
+          const account = await accountManager.getAccount(did, {
+            includeDeactivated: true,
+            includeTakenDown: true,
+          })
+
+          signal?.throwIfAborted()
+
+          // Mirror what com.atproto.sync.getRecord would answer to an
+          // unauthenticated requester
+          if (account?.takedownRef) {
+            throw new LexResolverError(nsid, `Repo is not available: ${did}`)
+          }
+
+          // Not hosted here: fall back to the network resolution
+          if (!account || account.deactivatedAt) return undefined
+
+          const record = await actorStore.read(account.did, (store) => {
+            return store.record.getRecord(uri, null)
+          })
+
+          if (!record || record.takedownRef != null) {
+            throw new LexResolverError(
+              nsid,
+              `Lexicon record not found at ${uri}`,
+            )
+          }
+
+          return {
+            cid: parseCid(record.cid),
+            record: record.value,
+          }
+        },
+        onFetchResult({ uri, cid, source }) {
+          lexiconResolverLogger.info(
+            { uri: uri.toString(), cid: cid.toString(), source },
+            'Fetched lexicon',
           )
+        },
+        onFetchError({ err, uri }) {
+          lexiconResolverLogger.error(
+            { uri: uri.toString(), err },
+            'Lexicon fetch error',
+          )
+        },
+        onResolveAuthority: ({ nsid }) => {
+          lexiconResolverLogger.debug(
+            { nsid: nsid.toString() },
+            'Resolving lexicon DID authority',
+          )
+          // Override the lexicon did resolution to point to a custom PDS
+          return cfg.lexicon.didAuthority
+        },
+        onResolveAuthorityResult({ nsid, did, source }) {
+          lexiconResolverLogger.info(
+            { nsid: nsid.toString(), did, source },
+            'Resolved lexicon DID',
+          )
+        },
+        onResolveAuthorityError({ nsid, err }) {
+          lexiconResolverLogger.error(
+            { nsid: nsid.toString(), err },
+            'Lexicon DID resolution error',
+          )
+        },
+      },
+    })
 
     const localViewer = LocalViewer.creator(
       accountManager,
@@ -292,71 +439,7 @@ export class AppContext {
     )
 
     // An agent for performing HTTP requests based on user provided URLs.
-    const proxyAgentBase = new undici.Agent({
-      allowH2: cfg.proxy.allowHTTP2, // This is experimental
-      headersTimeout: cfg.proxy.headersTimeout,
-      maxResponseSize: cfg.proxy.maxResponseSize,
-      bodyTimeout: cfg.proxy.bodyTimeout,
-      factory: cfg.proxy.disableSsrfProtection
-        ? undefined
-        : (origin, opts) => {
-            const { protocol, hostname } =
-              origin instanceof URL ? origin : new URL(origin)
-            if (protocol !== 'https:') {
-              throw new Error(`Forbidden protocol "${protocol}"`)
-            }
-            if (isUnicastIp(hostname) === false) {
-              throw new Error('Hostname resolved to non-unicast address')
-            }
-            return new undici.Pool(origin, opts)
-          },
-      connect: {
-        lookup: cfg.proxy.disableSsrfProtection ? undefined : unicastLookup,
-      },
-    })
-    const proxyAgent =
-      cfg.proxy.maxRetries > 0
-        ? new undici.RetryAgent(proxyAgentBase, {
-            statusCodes: [], // Only retry on socket errors
-            methods: ['GET', 'HEAD'],
-            maxRetries: cfg.proxy.maxRetries,
-          })
-        : proxyAgentBase
-
-    /**
-     * A fetch() function that protects against SSRF attacks, large responses &
-     * known bad domains. This function can safely be used to fetch user
-     * provided URLs (unless "disableSsrfProtection" is true, of course).
-     *
-     * @note **DO NOT** wrap `safeFetch` with any logging or other transforms as
-     * this might prevent the use of explicit `redirect: "follow"` init from
-     * working. See {@link safeFetchWrap}.
-     */
-    const safeFetch = safeFetchWrap({
-      allowIpHost: false,
-      allowImplicitRedirect: false,
-      responseMaxSize: cfg.fetch.maxResponseSize,
-      ssrfProtection: !cfg.fetch.disableSsrfProtection,
-
-      // @NOTE Since we are using NodeJS <= 20, unicastFetchWrap would normally
-      // *not* be using a keep-alive agent if it we are providing a fetch
-      // function that is different from `globalThis.fetch`. However, since the
-      // fetch function below is indeed calling `globalThis.fetch` without
-      // altering any argument, we can safely force the use of the keep-alive
-      // agent. This would not be the case if we used "loggedFetch" as that
-      // function does wrap the input & init arguments into a Request object,
-      // which, on NodeJS<=20, results in init.dispatcher *not* being used.
-      dangerouslyForceKeepAliveAgent: true,
-      fetch: function (input, init) {
-        const method =
-          init?.method ?? (input instanceof Request ? input.method : 'GET')
-        const uri = input instanceof Request ? input.url : String(input)
-
-        fetchLogger.info({ method, uri }, 'fetch')
-
-        return globalThis.fetch.call(this, input, init)
-      },
-    })
+    const proxyAgent = buildProxyAgent(cfg.proxy)
 
     const oauthProvider = cfg.oauth.provider
       ? new OAuthProvider({
@@ -380,45 +463,16 @@ export class AppContext {
           availableUserDomains: cfg.identity.serviceHandleDomains,
           hcaptcha: cfg.oauth.provider.hcaptcha,
           branding: cfg.oauth.provider.branding,
+          // @NOTE Not operator-configurable on purpose: changing the email
+          // address unconditionally clears `emailAuthFactorAt` (see
+          // `account-manager/helpers/account.ts`), so the warning describes
+          // what this implementation always does rather than a preference. This
+          // is because updating email writes an unconfirmed email to the email
+          // column, which means leaving email based 2FA enabled can result in
+          // account lock-out.
+          show2FaWarningOnEmailUpdate: true,
           safeFetch,
-          lexResolver: new LexResolver({
-            fetch: safeFetch,
-            plcDirectoryUrl: cfg.identity.plcUrl,
-            hooks: {
-              onResolveAuthority: ({ nsid }) => {
-                lexiconResolverLogger.debug(
-                  { nsid: nsid.toString() },
-                  'Resolving lexicon DID authority',
-                )
-                // Override the lexicon did resolution to point to a custom PDS
-                return cfg.lexicon.didAuthority
-              },
-              onResolveAuthorityResult({ nsid, did }) {
-                lexiconResolverLogger.info(
-                  { nsid: nsid.toString(), did },
-                  'Resolved lexicon DID',
-                )
-              },
-              onResolveAuthorityError({ nsid, err }) {
-                lexiconResolverLogger.error(
-                  { nsid: nsid.toString(), err },
-                  'Lexicon DID resolution error',
-                )
-              },
-              onFetchResult({ uri, cid }) {
-                lexiconResolverLogger.info(
-                  { uri: uri.toString(), cid: cid.toString() },
-                  'Fetched lexicon',
-                )
-              },
-              onFetchError({ err, uri }) {
-                lexiconResolverLogger.error(
-                  { uri: uri.toString(), err },
-                  'Lexicon fetch error',
-                )
-              },
-            },
-          }),
+          lexResolver,
           metadata: {
             protected_resources: [new URL(cfg.oauth.issuer).origin],
           },
@@ -433,6 +487,44 @@ export class AppContext {
             return {
               isTrusted: cfg.oauth.provider?.trustedClients?.includes(clientId),
             }
+          },
+          onSignedUp({ account, data, clientId }) {
+            events.accountCreated({
+              source: 'oauth',
+              did: account.did,
+              clientId,
+              invited: data.inviteCode != null,
+              deactivated: false,
+            })
+          },
+          onSignedIn({ account, clientId }) {
+            events.signedIn({
+              did: account.did,
+              clientId,
+            })
+          },
+          onAuthorized({ account, client }) {
+            events.oauthAuthorized({
+              did: account.did,
+              clientId: client.id,
+              clientFirstParty: client.isFirstParty,
+              clientTrusted: client.isTrusted,
+              clientConfidential: client.isConfidential,
+            })
+          },
+          onTokenCreated({ account, client }) {
+            events.sessionCreated({
+              source: 'oauth',
+              did: account.did,
+              clientId: client.id,
+            })
+          },
+          onTokenRefreshed({ account, client }) {
+            events.sessionRefreshed({
+              source: 'oauth',
+              did: account.did,
+              clientId: client.id,
+            })
           },
         })
       : undefined
@@ -530,6 +622,26 @@ export class AppContext {
     return forwardedFor(req, authPassthru(req))
   }
 
+  /**
+   * A {@link Client} for a service URL that was resolved from a DID document,
+   * i.e. a URL the PDS does not control. Routes the request through
+   * {@link safeFetch}, which restricts it to https origins that resolve to
+   * unicast addresses, and caps the response size. Lexicon validation follows
+   * the service's dev mode, as it does for the AppView client.
+   *
+   * Any call built from a DID document's service endpoint must use this.
+   */
+  safeClient(service: string | URL): Client {
+    return new Client(
+      { service, fetch: this.safeFetch },
+      {
+        validateRequest: this.cfg.service.devMode,
+        validateResponse: this.cfg.service.devMode,
+        strictResponseProcessing: this.cfg.service.devMode,
+      },
+    )
+  }
+
   async serviceAuthHeaders(did: string, aud: string, lxm: string) {
     const keypair = await this.actorStore.keypair(did)
     return createServiceAuthHeaders({
@@ -548,6 +660,36 @@ export class AppContext {
       lxm,
       keypair,
     })
+  }
+
+  async destroy(): Promise<void> {
+    // @TODO Implement this using an AsyncDisposableStack when it becomes
+    // widely available.
+    try {
+      await this.backgroundQueue.destroy()
+    } finally {
+      try {
+        await this.sequencer.destroy()
+      } finally {
+        try {
+          await this.accountManager.close()
+        } finally {
+          try {
+            await this.redisScratch?.quit()
+          } finally {
+            try {
+              await this.proxyAgent.destroy()
+            } finally {
+              await this.blobstore[Symbol.asyncDispose]()
+            }
+          }
+        }
+      }
+    }
+  }
+
+  async [Symbol.asyncDispose]() {
+    await this.destroy()
   }
 }
 

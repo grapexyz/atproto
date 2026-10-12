@@ -1,10 +1,14 @@
-import { Cid } from '@atproto/lex'
+import { type Cid, getBlobCidString } from '@atproto/lex'
 import { AtUri } from '@atproto/syntax'
-import { app } from '../../../../lexicons'
-import { BackgroundQueue } from '../../background'
-import { Database } from '../../db'
-import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { RecordProcessor } from '../processor'
+import { NOTIFICATION_REASON } from '../../../../api/app/bsky/notification/constants.js'
+import { app } from '../../../../lexicons/index.js'
+import type { BackgroundQueue } from '../../background.js'
+import type {
+  DatabaseSchema,
+  DatabaseSchemaType,
+} from '../../db/database-schema.js'
+import type { Database } from '../../db/index.js'
+import { RecordProcessor } from '../processor.js'
 
 type IndexedProfile = DatabaseSchemaType['profile']
 
@@ -24,8 +28,8 @@ const insertFn = async (
       creator: uri.host,
       displayName: obj.displayName,
       description: obj.description,
-      avatarCid: obj.avatar?.ref.toString(),
-      bannerCid: obj.banner?.ref.toString(),
+      avatarCid: getBlobCidString(obj.avatar),
+      bannerCid: getBlobCidString(obj.banner),
       joinedViaStarterPackUri: obj.joinedViaStarterPack?.uri,
       createdAt: obj.createdAt ?? new Date().toISOString(),
       indexedAt: timestamp,
@@ -49,7 +53,7 @@ const notifsForInsert = (obj: IndexedProfile) => {
       author: obj.creator,
       recordUri: obj.uri,
       recordCid: obj.cid,
-      reason: 'starterpack-joined' as const,
+      reason: NOTIFICATION_REASON.STARTERPACK_JOINED,
       reasonSubject: obj.joinedViaStarterPackUri,
       sortAt: obj.indexedAt,
     },
@@ -73,7 +77,10 @@ const notifsForDelete = () => {
 }
 
 export type PluginType = ReturnType<typeof makePlugin>
-export const makePlugin = (db: Database, background: BackgroundQueue) => {
+export const makePlugin = (
+  db: Database,
+  background: BackgroundQueue<Database>,
+) => {
   return new RecordProcessor(db, background, {
     schema: app.bsky.actor.profile.main,
     insertFn,

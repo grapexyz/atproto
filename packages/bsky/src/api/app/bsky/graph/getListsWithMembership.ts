@@ -1,19 +1,22 @@
 import { mapDefined } from '@atproto/common'
-import { AtUriString, DidString } from '@atproto/lex'
-import { InvalidRequestError, Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
-import { HydrateCtx, Hydrator } from '../../../../hydration/hydrator'
-import { parseString } from '../../../../hydration/util'
+import type { AtUriString, DidString } from '@atproto/lex'
+import { InvalidRequestError, type Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
+import type {
+  HydrateCtxWithViewer,
+  Hydrator,
+} from '../../../../hydration/hydrator.js'
+import { parseString } from '../../../../hydration/util.js'
 import { app } from '../../../../lexicons/index.js'
 import {
-  HydrationFnInput,
-  PresentationFnInput,
-  RulesFnInput,
-  SkeletonFnInput,
+  type HydrationFnInput,
+  type PresentationFnInput,
+  type RulesFnInput,
+  type SkeletonFnInput,
   createPipeline,
-} from '../../../../pipeline'
-import { Views } from '../../../../views'
-import { clearlyBadCursor, resHeaders } from '../../../util'
+} from '../../../../pipeline.js'
+import type { Views } from '../../../../views/index.js'
+import { clearlyBadCursor, fillPage, resHeaders } from '../../../util.js'
 
 const CURATELIST = app.bsky.graph.defs.curatelist.value
 const MODLIST = app.bsky.graph.defs.modlist.value
@@ -34,10 +37,13 @@ export default function (server: Server, ctx: AppContext) {
         labelers,
         viewer,
       })
-      const result = await getListsWithMembership(
-        { ...params, hydrateCtx: hydrateCtx.copy({ viewer }) },
-        ctx,
-      )
+      const result = await fillPage({
+        cursor: params.cursor,
+        limit: params.limit,
+        fetch: ({ cursor, limit }) =>
+          getListsWithMembership({ ...params, cursor, limit, hydrateCtx }, ctx),
+        items: (r) => r.listsWithMembership,
+      })
 
       return {
         encoding: 'application/json',
@@ -95,8 +101,8 @@ const filterPurposes = (
   if (purposes.includes('curatelist')) acceptedPurposes.add(CURATELIST)
   if (purposes.includes(CURATELIST)) acceptedPurposes.add(CURATELIST)
 
-  // @NOTE: While we don't support filtering on the dataplane, this might result in empty pages.
-  // Despite the empty pages, the pagination still can enumerate all items for the specified filters.
+  // Purpose filtering happens after dataplane pagination. fillPage requests
+  // subsequent dataplane pages to replace lists filtered out here.
   skeleton.listUris = skeleton.listUris.filter((uri) => {
     const list = hydration.lists?.get(uri)
     return acceptedPurposes.has(list?.record.purpose)
@@ -133,7 +139,7 @@ type Context = {
 }
 
 type Params = app.bsky.graph.getListsWithMembership.$Params & {
-  hydrateCtx: HydrateCtx & { viewer: string }
+  hydrateCtx: HydrateCtxWithViewer
 }
 
 type SkeletonState = {

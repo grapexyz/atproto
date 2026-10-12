@@ -1,10 +1,10 @@
-import { StandardSchemaV1 } from '@standard-schema/spec'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { lazyProperty } from '../util/lazy-property.js'
 import { StandardSchemaAdapter } from './standard-schema.js'
-import {
+import { ValidationContext } from './validator.js'
+import type {
   InferInput,
   InferOutput,
-  ValidationContext,
   ValidationOptions,
   ValidationResult,
   Validator,
@@ -84,7 +84,7 @@ export abstract class Schema<out TInput = unknown, out TOutput = TInput>
    */
   declare readonly ['__lex']: SchemaInternals<TInput, TOutput>
 
-  get '~standard'(): StandardSchemaV1.Props<TInput, TOutput> {
+  get '~standard'(): StandardSchemaAdapter<TInput, TOutput> {
     // Lazily create, and cache, the Standard Schema adapter for this schema
     // instance.
     return lazyProperty(this, '~standard', new StandardSchemaAdapter(this))

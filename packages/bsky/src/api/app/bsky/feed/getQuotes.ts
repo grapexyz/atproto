@@ -1,18 +1,18 @@
 import { mapDefined } from '@atproto/common'
-import { AtUriString } from '@atproto/syntax'
-import { Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
-import {
+import type { AtUriString } from '@atproto/syntax'
+import type { Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
+import type {
   HydrateCtx,
   HydrationState,
   Hydrator,
-} from '../../../../hydration/hydrator'
-import { parseString } from '../../../../hydration/util'
+} from '../../../../hydration/hydrator.js'
+import { parseString } from '../../../../hydration/util.js'
 import { app } from '../../../../lexicons/index.js'
-import { createPipeline } from '../../../../pipeline'
-import { uriToDid } from '../../../../util/uris'
-import { Views } from '../../../../views'
-import { clearlyBadCursor, resHeaders } from '../../../util'
+import { createPipeline } from '../../../../pipeline.js'
+import { uriToDid } from '../../../../util/uris.js'
+import type { Views } from '../../../../views/index.js'
+import { clearlyBadCursor, fillPage, resHeaders } from '../../../util.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getQuotes = createPipeline(
@@ -24,14 +24,22 @@ export default function (server: Server, ctx: AppContext) {
   server.add(app.bsky.feed.getQuotes, {
     auth: ctx.authVerifier.standardOptional,
     handler: async ({ params, auth, req }) => {
-      const { viewer, includeTakedowns } = ctx.authVerifier.parseCreds(auth)
+      const { viewer, includeTakedowns, skipViewerBlocks } =
+        ctx.authVerifier.parseCreds(auth)
       const labelers = ctx.reqLabelers(req)
       const hydrateCtx = await ctx.hydrator.createContext({
         labelers,
         viewer,
         includeTakedowns,
+        skipViewerBlocks,
       })
-      const result = await getQuotes({ ...params, hydrateCtx }, ctx)
+      const result = await fillPage({
+        cursor: params.cursor,
+        limit: params.limit,
+        fetch: ({ cursor, limit }) =>
+          getQuotes({ ...params, cursor, limit, hydrateCtx }, ctx),
+        items: (r) => r.posts,
+      })
       return {
         encoding: 'application/json',
         body: result,
@@ -53,6 +61,7 @@ const skeleton = async (inputs: {
     subject: { uri: params.uri, cid: params.cid },
     cursor: params.cursor,
     limit: params.limit,
+    sort: params.sort,
   })
   return {
     uris: quotesRes.uris as AtUriString[],

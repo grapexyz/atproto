@@ -1,19 +1,22 @@
 import { mapDefined } from '@atproto/common'
-import { AtUriString } from '@atproto/syntax'
-import { Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
-import { DataPlaneClient } from '../../../../data-plane'
-import { FeedItem } from '../../../../hydration/feed'
+import type { AtUriString } from '@atproto/syntax'
+import type { Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
 import {
-  HydrateCtx,
+  type DataPlaneClient,
+  asInvalidRequest,
+} from '../../../../data-plane/index.js'
+import type { FeedItem } from '../../../../hydration/feed.js'
+import type {
+  HydrateCtxWithViewer,
   HydrationState,
   Hydrator,
-} from '../../../../hydration/hydrator'
-import { parseString } from '../../../../hydration/util'
+} from '../../../../hydration/hydrator.js'
+import { parseString } from '../../../../hydration/util.js'
 import { app } from '../../../../lexicons/index.js'
-import { createPipeline } from '../../../../pipeline'
-import { Views } from '../../../../views'
-import { clearlyBadCursor, resHeaders } from '../../../util'
+import { createPipeline } from '../../../../pipeline.js'
+import type { Views } from '../../../../views/index.js'
+import { clearlyBadCursor, fillPage, resHeaders } from '../../../util.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getTimeline = createPipeline(
@@ -32,12 +35,25 @@ export default function (server: Server, ctx: AppContext) {
     handler: async ({ params, auth, req }) => {
       const viewer = auth.credentials.iss
       const labelers = ctx.reqLabelers(req)
-      const hydrateCtx = await ctx.hydrator.createContext({ labelers, viewer })
+      const hydrateCtx = await ctx.hydrator.createContext({
+        labelers,
+        viewer,
+        features: ctx.featureGatesClient.scope(
+          ctx.featureGatesClient.parseUserContextFromHandler({ viewer, req }),
+        ),
+      })
 
-      const result = await getTimeline(
-        { ...params, hydrateCtx: hydrateCtx.copy({ viewer }) },
-        ctx,
-      )
+      const result = await fillPage({
+        cursor: params.cursor,
+        limit: params.limit,
+        // @NOTE the dataplane echoes `since` back as the cursor once the
+        // bounded range is exhausted. Refilling past it would read below the
+        // boundary.
+        terminalCursor: params.since,
+        fetch: ({ cursor, limit }) =>
+          getTimeline({ ...params, cursor, limit, hydrateCtx }, ctx),
+        items: (r) => r.feed,
+      })
 
       const repoRev = await ctx.hydrator.actor.getRepoRevSafe(viewer)
 
@@ -56,13 +72,16 @@ export const skeleton = async (inputs: {
 }): Promise<Skeleton> => {
   const { ctx, params } = inputs
   if (clearlyBadCursor(params.cursor)) {
-    return { items: [] }
+    return { items: [], cursor: params.since }
   }
-  const res = await ctx.dataplane.getTimeline({
-    actorDid: params.hydrateCtx.viewer,
-    limit: params.limit,
-    cursor: params.cursor,
-  })
+  const res = await ctx.dataplane
+    .getTimeline({
+      actorDid: params.hydrateCtx.viewer,
+      limit: params.limit,
+      cursor: params.cursor,
+      since: params.since,
+    })
+    .catch(asInvalidRequest())
   return {
     items: res.items.map((item) => ({
       post: { uri: item.uri as AtUriString, cid: item.cid || undefined },
@@ -71,6 +90,7 @@ export const skeleton = async (inputs: {
         : undefined,
     })),
     cursor: parseString(res.cursor),
+    startCursor: parseString(res.startCursor),
   }
 }
 
@@ -80,7 +100,13 @@ const hydration = async (inputs: {
   skeleton: Skeleton
 }): Promise<HydrationState> => {
   const { ctx, params, skeleton } = inputs
-  return ctx.hydrator.hydrateFeedItems(skeleton.items, params.hydrateCtx)
+  return ctx.hydrator.hydrateFeedItems(skeleton.items, params.hydrateCtx, {
+    knownLikers:
+      !!params.hydrateCtx.viewer &&
+      params.hydrateCtx.features.checkGate(
+        params.hydrateCtx.features.Gate.KnownLikersFeedEnable,
+      ),
+  })
 }
 
 const noBlocksOrMutes = (inputs: {
@@ -94,8 +120,10 @@ const noBlocksOrMutes = (inputs: {
     return (
       !bam.authorBlocked &&
       !bam.authorMuted &&
+      !bam.authorQuotepostMuted &&
       !bam.originatorBlocked &&
       !bam.originatorMuted &&
+      !bam.originatorRepostMuted &&
       !bam.ancestorAuthorBlocked
     )
   })
@@ -111,7 +139,11 @@ const presentation = (inputs: {
   const feed = mapDefined(skeleton.items, (item) =>
     ctx.views.feedViewPost(item, hydration),
   )
-  return { feed, cursor: skeleton.cursor }
+  return {
+    feed,
+    cursor: skeleton.cursor,
+    startCursor: skeleton.startCursor,
+  }
 }
 
 type Context = {
@@ -121,10 +153,11 @@ type Context = {
 }
 
 type Params = app.bsky.feed.getTimeline.$Params & {
-  hydrateCtx: HydrateCtx & { viewer: string }
+  hydrateCtx: HydrateCtxWithViewer
 }
 
 type Skeleton = {
   items: FeedItem[]
   cursor?: string
+  startCursor?: string
 }

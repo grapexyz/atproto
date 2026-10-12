@@ -1,13 +1,28 @@
 import assert from 'node:assert'
 import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  test,
+} from 'vitest'
+import {
   AppBskyEmbedRecord,
   AppBskyFeedDefs,
   AtUri,
-  AtpAgent,
+  type AtpAgent,
   ids,
 } from '@atproto/api'
-import { RecordRef, SeedClient, TestNetwork, basicSeed } from '@atproto/dev-env'
-import { assertIsThreadViewPost, forSnapshot } from '../_util'
+import {
+  type RecordRef,
+  type SeedClient,
+  TestNetwork,
+  basicSeed,
+} from '@atproto/dev-env'
+import type { DidString } from '@atproto/syntax'
+import { assertIsThreadViewPost, forSnapshot } from '../_util.js'
 
 describe('pds views with blocking', () => {
   let network: TestNetwork
@@ -18,10 +33,10 @@ describe('pds views with blocking', () => {
   let aliceReplyToDan: { ref: RecordRef }
   let carolReplyToDan: { ref: RecordRef }
 
-  let alice: string
-  let bob: string
-  let carol: string
-  let dan: string
+  let alice: DidString
+  let bob: DidString
+  let carol: DidString
+  let dan: DidString
   let danBlockUri: string
 
   beforeAll(async () => {
@@ -45,7 +60,7 @@ describe('pds views with blocking', () => {
       sc.posts[dan][0].ref,
       'alice replies to dan',
     )
-    const _carolReplyToAliceReplyToDan = await sc.reply(
+    await sc.reply(
       carol,
       sc.posts[dan][0].ref,
       aliceReplyToDan.ref,
@@ -64,12 +79,10 @@ describe('pds views with blocking', () => {
       sc.getHeaders(dan),
     )
     danBlockUri = danBlockCarol.uri
-    await network.processAll()
   })
 
-  afterAll(async () => {
-    await network.close()
-  })
+  beforeEach(async () => network.processAll())
+  afterAll(async () => network?.close())
 
   it('blocks thread post', async () => {
     const { data: threadAlice } = await agent.api.app.bsky.feed.getPostThread(
@@ -769,7 +782,7 @@ describe('pds views with blocking', () => {
   })
 
   it('returns a list of blocks', async () => {
-    await pdsAgent.api.app.bsky.graph.block.create(
+    const danBlockAlice = await pdsAgent.api.app.bsky.graph.block.create(
       { repo: dan },
       { createdAt: new Date().toISOString(), subject: alice },
       sc.getHeaders(dan),
@@ -783,6 +796,37 @@ describe('pds views with blocking', () => {
     )
     const dids = res.data.blocks.map((block) => block.did).sort()
     expect(dids).toEqual([alice, carol].sort())
+
+    const exact = await network.bsky.ctx.dataplane.getBlocks({
+      actorDid: dan,
+      limit: 2,
+    })
+    const nonterminal = await network.bsky.ctx.dataplane.getBlocks({
+      actorDid: dan,
+      limit: 1,
+    })
+    expect(exact.blockUris).toHaveLength(2)
+    expect(exact.cursor).toBe('')
+    expect(nonterminal.blockUris).toHaveLength(1)
+    expect(nonterminal.cursor).not.toBe('')
+
+    await network.bsky.ctx.dataplane.takedownRecord({
+      recordUri: danBlockAlice.uri,
+    })
+    try {
+      const filtered = await agent.api.app.bsky.graph.getBlocks(
+        { limit: 1 },
+        {
+          headers: await network.serviceHeaders(dan, ids.AppBskyGraphGetBlocks),
+        },
+      )
+      expect(filtered.data.blocks.map((block) => block.did)).toEqual([carol])
+      expect(filtered.data.cursor).toBeUndefined()
+    } finally {
+      await network.bsky.ctx.dataplane.untakedownRecord({
+        recordUri: danBlockAlice.uri,
+      })
+    }
   })
 
   it('paginates getBlocks', async () => {
@@ -799,6 +843,9 @@ describe('pds views with blocking', () => {
       { headers: await network.serviceHeaders(dan, ids.AppBskyGraphGetBlocks) },
     )
     const combined = [...first.data.blocks, ...second.data.blocks]
+    expect(first.data.blocks).toHaveLength(1)
+    expect(first.data.cursor).toBeDefined()
+    expect(second.data.cursor).toBeUndefined()
     expect(combined).toEqual(full.data.blocks)
   })
 
@@ -816,5 +863,127 @@ describe('pds views with blocking', () => {
     const knownFollowers = carolForAlice.data.viewer?.knownFollowers
     expect(knownFollowers?.count).toBe(1)
     expect(knownFollowers?.followers).toHaveLength(0)
+  })
+
+  describe('mod service sees through blocks', () => {
+    let modServiceDid: DidString
+
+    beforeAll(async () => {
+      modServiceDid = network.bsky.ctx.cfg.modServiceDid
+      // alice blocks the mod service
+      await pdsAgent.app.bsky.graph.block.create(
+        { repo: alice },
+        { createdAt: new Date().toISOString(), subject: modServiceDid },
+        sc.getHeaders(alice),
+      )
+
+      const modAgent = network.pds.getAgent()
+      await modAgent.login({ identifier: modServiceDid, password: 'hunter2' })
+      await modAgent.app.bsky.graph.block.create(
+        { repo: modServiceDid },
+        { createdAt: new Date().toISOString(), subject: bob },
+      )
+
+      const carolList = await sc.createList(carol, 'Blocked viewers', 'mod')
+      await sc.addToList(carol, modServiceDid, carolList)
+      await pdsAgent.app.bsky.graph.listblock.create(
+        { repo: carol },
+        { createdAt: new Date().toISOString(), subject: carolList.uriStr },
+        sc.getHeaders(carol),
+      )
+
+      const modList = await sc.createList(alice, 'Blocked authors', 'mod')
+      await sc.addToList(alice, dan, modList)
+      await modAgent.app.bsky.graph.listblock.create(
+        { repo: modServiceDid },
+        { createdAt: new Date().toISOString(), subject: modList.uriStr },
+      )
+      await network.processAll()
+    })
+
+    test.each([
+      { issuer: 'service DID', actor: 'alice', block: 'blocked by actor' },
+      { issuer: 'labeler service', actor: 'alice', block: 'blocked by actor' },
+      { issuer: 'service DID', actor: 'bob', block: 'blocking actor' },
+      { issuer: 'labeler service', actor: 'bob', block: 'blocking actor' },
+      { issuer: 'service DID', actor: 'carol', block: 'blocked by list' },
+      { issuer: 'labeler service', actor: 'carol', block: 'blocked by list' },
+      { issuer: 'service DID', actor: 'dan', block: 'blocking by list' },
+      { issuer: 'labeler service', actor: 'dan', block: 'blocking by list' },
+    ] as const)(
+      '$issuer gets author feed when $block',
+      async ({ issuer, actor }) => {
+        const options =
+          issuer === 'labeler service'
+            ? await network.ozone.ctx.appviewAuth(ids.AppBskyFeedGetAuthorFeed)
+            : {
+                headers: await network.serviceHeaders(
+                  modServiceDid,
+                  ids.AppBskyFeedGetAuthorFeed,
+                ),
+              }
+        const { data } = await agent.app.bsky.feed.getAuthorFeed(
+          { actor: sc.dids[actor], limit: 5, filter: 'posts_no_replies' },
+          options,
+        )
+        expect(data.feed.map(({ post }) => post.uri)).toContain(
+          sc.posts[sc.dids[actor]][0].ref.uriStr,
+        )
+      },
+    )
+
+    it('mod service viewer preserves block state on getProfile', async () => {
+      // alice blocked the mod service, mod service views alice's profile
+      const res = await agent.app.bsky.actor.getProfile(
+        { actor: alice },
+        {
+          headers: await network.serviceHeaders(
+            modServiceDid,
+            ids.AppBskyActorGetProfile,
+          ),
+        },
+      )
+      // block state is still present on the viewer
+      expect(res.data.viewer?.blockedBy).toBe(true)
+      expect(res.data.viewer?.blocking).toBeUndefined()
+    })
+
+    it('mod service sees through blocks on getPostThread', async () => {
+      // alice has posts; mod service should see them even though alice blocked mod service
+      const { data } = await agent.app.bsky.feed.getPostThread(
+        { depth: 1, uri: sc.posts[alice][0].ref.uriStr },
+        {
+          headers: await network.serviceHeaders(
+            modServiceDid,
+            ids.AppBskyFeedGetPostThread,
+          ),
+        },
+      )
+      assertIsThreadViewPost(data.thread)
+      expect(data.thread.post.uri).toBe(sc.posts[alice][0].ref.uriStr)
+    })
+
+    it('mod service sees through blocks on getPostThreadV2', async () => {
+      const { data } = await agent.app.bsky.unspecced.getPostThreadV2(
+        { anchor: sc.posts[alice][0].ref.uriStr },
+        {
+          headers: await network.serviceHeaders(
+            modServiceDid,
+            ids.AppBskyUnspeccedGetPostThreadV2,
+          ),
+        },
+      )
+      expect(data.thread).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            uri: sc.posts[alice][0].ref.uriStr,
+            depth: 0,
+            value: expect.objectContaining({
+              $type: 'app.bsky.unspecced.defs#threadItemPost',
+            }),
+          }),
+        ]),
+      )
+    })
   })
 })

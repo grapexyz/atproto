@@ -28,20 +28,14 @@ export function readEnv() {
     trustedOAuthClients: envList('PDS_OAUTH_TRUSTED_CLIENTS'),
 
     // branding
-    lightColor: envStr('PDS_LIGHT_COLOR'),
-    darkColor: envStr('PDS_DARK_COLOR'),
     primaryColor: envStr('PDS_PRIMARY_COLOR'),
-    primaryColorContrast: envStr('PDS_PRIMARY_COLOR_CONTRAST'),
-    primaryColorHue: envInt('PDS_PRIMARY_COLOR_HUE'),
     errorColor: envStr('PDS_ERROR_COLOR'),
-    errorColorContrast: envStr('PDS_ERROR_COLOR_CONTRAST'),
-    errorColorHue: envInt('PDS_ERROR_COLOR_HUE'),
     warningColor: envStr('PDS_WARNING_COLOR'),
-    warningColorContrast: envStr('PDS_WARNING_COLOR_CONTRAST'),
-    warningColorHue: envInt('PDS_WARNING_COLOR_HUE'),
+    infoColor: envStr('PDS_INFO_COLOR'),
     successColor: envStr('PDS_SUCCESS_COLOR'),
-    successColorContrast: envStr('PDS_SUCCESS_COLOR_CONTRAST'),
-    successColorHue: envInt('PDS_SUCCESS_COLOR_HUE'),
+
+    backgroundLightUrl: envStr('PDS_BACKGROUND_LIGHT_URL'),
+    backgroundDarkUrl: envStr('PDS_BACKGROUND_DARK_URL'),
 
     // database
     dataDirectory: envStr('PDS_DATA_DIRECTORY'),
@@ -63,6 +57,7 @@ export function readEnv() {
     blobstoreS3AccessKeyId: envStr('PDS_BLOBSTORE_S3_ACCESS_KEY_ID'),
     blobstoreS3SecretAccessKey: envStr('PDS_BLOBSTORE_S3_SECRET_ACCESS_KEY'),
     blobstoreS3UploadTimeoutMs: envInt('PDS_BLOBSTORE_S3_UPLOAD_TIMEOUT_MS'),
+    blobstoreS3RequestTimeoutMs: envInt('PDS_BLOBSTORE_S3_REQUEST_TIMEOUT_MS'),
     // disk
     blobstoreDiskLocation: envStr('PDS_BLOBSTORE_DISK_LOCATION'),
     blobstoreDiskTmpLocation: envStr('PDS_BLOBSTORE_DISK_TMP_LOCATION'),
@@ -93,6 +88,9 @@ export function readEnv() {
     // email
     emailSmtpUrl: envStr('PDS_EMAIL_SMTP_URL'),
     emailFromAddress: envStr('PDS_EMAIL_FROM_ADDRESS'),
+    emailDisableConfirmationLink: envBool(
+      'PDS_EMAIL_DISABLE_CONFIRMATION_LINK',
+    ),
     moderationEmailSmtpUrl: envStr('PDS_MODERATION_EMAIL_SMTP_URL'),
     moderationEmailAddress: envStr('PDS_MODERATION_EMAIL_ADDRESS'),
 

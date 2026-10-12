@@ -1,8 +1,14 @@
 import { resolveTxt } from 'node:dns/promises'
 import * as crypto from '@atproto/crypto'
 import { buildAgent, xrpc } from '@atproto/lex-client'
-import { Cid } from '@atproto/lex-data'
-import { LexiconDocument, lexiconDocumentSchema } from '@atproto/lex-document'
+import {
+  type CborCid,
+  type Cid,
+  type LexMap,
+  isCborCid,
+} from '@atproto/lex-data'
+import type { LexiconDocument } from '@atproto/lex-document'
+import { lexiconDocumentSchema } from '@atproto/lex-document'
 import {
   MST,
   MemoryBlockstore,
@@ -10,19 +16,23 @@ import {
   readCarWithRoot,
   verifyCommitSig,
 } from '@atproto/repo'
-import { AtUri, NSID, NsidString } from '@atproto/syntax'
+import type { NsidString } from '@atproto/syntax'
+import { AtUri, NSID } from '@atproto/syntax'
 import {
+  assertDid,
+  createDidResolver,
+  extractAtprotoData,
+} from '@atproto-labs/did-resolver'
+import type {
   AtprotoVerificationMethod,
   CreateDidResolverOptions,
   Did,
   DidResolver,
   ResolveDidOptions,
-  assertDid,
-  createDidResolver,
-  extractAtprotoData,
 } from '@atproto-labs/did-resolver'
 import { LexResolverError } from './lex-resolver-error.js'
 import { com } from './lexicons/index.js'
+import { canParseUrl } from './util.js'
 
 /**
  * Result returned when successfully resolving a lexicon document.
@@ -34,7 +44,7 @@ export type LexResolverResult = {
   /** The AT URI where the lexicon document was found */
   uri: AtUri
   /** Content identifier (CID) of the lexicon record for integrity verification */
-  cid: Cid
+  cid: CborCid
   /** The parsed and validated lexicon document */
   lexicon: LexiconDocument
 }
@@ -50,10 +60,10 @@ export type LexResolverFetchResult = {
   /** Content identifier (CID) of the lexicon record */
   cid: Cid
   /** The parsed and validated lexicon document */
-  lexicon: LexiconDocument
+  record: LexMap
 }
 
-export type Awaitable<T> = T | Promise<T>
+type Awaitable<T> = T | PromiseLike<T>
 
 /**
  * Callback hooks for customizing the lexicon resolution process.
@@ -116,7 +126,11 @@ export type LexResolverHooks = {
    *
    * @param data - Object containing the NSID and resolved DID
    */
-  onResolveAuthorityResult?(data: { nsid: NSID; did: Did }): Awaitable<void>
+  onResolveAuthorityResult?(data: {
+    nsid: NSID
+    did: Did
+    source: 'hook' | 'network'
+  }): Awaitable<void>
 
   /**
    * Hook called when authority resolution fails.
@@ -133,7 +147,13 @@ export type LexResolverHooks = {
    * @param data - Object containing the URI being fetched
    * @returns A fetch result to use instead of default fetch, or void/undefined to proceed normally
    */
-  onFetch?(data: { uri: AtUri }): Awaitable<void | LexResolverFetchResult>
+  onFetch?(data: {
+    did: Did
+    nsid: NSID
+    uri: AtUri
+    signal?: AbortSignal
+    noCache?: boolean
+  }): Awaitable<void | LexResolverFetchResult>
 
   /**
    * Hook called after successfully fetching a lexicon document.
@@ -141,17 +161,25 @@ export type LexResolverHooks = {
    * @param data - Object containing the URI, CID, and parsed lexicon document
    */
   onFetchResult?(data: {
+    did: Did
+    nsid: NSID
     uri: AtUri
-    cid: Cid
+    cid: CborCid
     lexicon: LexiconDocument
+    source: 'hook' | 'network'
   }): Awaitable<void>
 
   /**
    * Hook called when fetching fails.
    *
-   * @param data - Object containing the URI and error that occurred
+   * @param data - Object containing the DID, NSID, URI, and error that occurred
    */
-  onFetchError?(data: { uri: AtUri; err: unknown }): Awaitable<void>
+  onFetchError?(data: {
+    did: Did
+    nsid: NSID
+    uri: AtUri
+    err: unknown
+  }): Awaitable<void>
 }
 
 /**
@@ -170,8 +198,8 @@ export type LexResolverOptions = CreateDidResolverOptions & {
   hooks?: LexResolverHooks
 }
 
-export { AtUri, type Cid, NSID }
-export type { LexiconDocument, ResolveDidOptions }
+export { AtUri, NSID }
+export type { CborCid, Cid, LexMap, LexiconDocument, ResolveDidOptions }
 
 /**
  * Resolves Lexicon documents from the AT Protocol network.
@@ -248,9 +276,11 @@ export type { LexiconDocument, ResolveDidOptions }
  * ```
  */
 export class LexResolver {
+  protected readonly options: LexResolverOptions
   protected readonly didResolver: DidResolver<'plc' | 'web'>
 
-  constructor(protected readonly options: LexResolverOptions) {
+  constructor(options: LexResolverOptions) {
+    this.options = options
     this.didResolver = createDidResolver(options)
   }
 
@@ -287,8 +317,9 @@ export class LexResolver {
     nsidStr: NSID | string,
     options?: ResolveDidOptions,
   ): Promise<LexResolverResult> {
-    const uri = await this.resolve(nsidStr)
-    return this.fetch(uri, options)
+    const nsid = NSID.from(nsidStr)
+    const did = await this.resolve(nsid)
+    return this.fetch(did, nsid, options)
   }
 
   /**
@@ -318,23 +349,29 @@ export class LexResolver {
    * const result = await resolver.fetch(uri)
    * ```
    */
-  async resolve(nsidStr: NSID | string): Promise<AtUri> {
-    const nsid = NSID.from(nsidStr)
+  async resolve(nsid: NSID): Promise<Did> {
+    try {
+      const hookDid = await this.options.hooks?.onResolveAuthority?.call(null, {
+        nsid,
+      })
 
-    const did =
-      (await this.options.hooks?.onResolveAuthority?.({ nsid })) ??
-      (await this.resolveLexiconAuthority(nsid).then(
-        async (did) => {
-          await this.options.hooks?.onResolveAuthorityResult?.({ nsid, did })
-          return did
-        },
-        async (err) => {
-          await this.options.hooks?.onResolveAuthorityError?.({ nsid, err })
-          throw err
-        },
-      ))
+      const did = hookDid ?? (await this.resolveLexiconAuthority(nsid))
 
-    return AtUri.make(did, 'com.atproto.lexicon.schema', nsid.toString())
+      await this.options.hooks?.onResolveAuthorityResult?.call(null, {
+        nsid,
+        did,
+        source: hookDid ? 'hook' : 'network',
+      })
+
+      return did
+    } catch (err) {
+      await this.options.hooks?.onResolveAuthorityError?.call(null, {
+        nsid,
+        err,
+      })
+
+      throw err
+    }
   }
 
   // @TODO This class could be made compatible with browsers by making the
@@ -387,33 +424,77 @@ export class LexResolver {
    * ```
    */
   async fetch(
-    uriStr: AtUri | string,
+    did: Did,
+    nsid: NSID,
     options?: ResolveDidOptions,
   ): Promise<LexResolverResult> {
-    const uri = typeof uriStr === 'string' ? new AtUri(uriStr) : uriStr
+    const uri = AtUri.make(did, 'com.atproto.lexicon.schema', nsid.toString())
+    try {
+      const hookResult = await this.options.hooks?.onFetch?.call(null, {
+        did,
+        nsid,
+        uri,
+        signal: options?.signal,
+        noCache: options?.noCache,
+      })
 
-    const { lexicon, cid } =
-      (await this.options.hooks?.onFetch?.({ uri })) ??
-      (await this.fetchLexiconUri(uri, options).then(
-        async (res) => {
-          await this.options.hooks?.onFetchResult?.({ uri, ...res })
-          return res
-        },
-        async (err) => {
-          await this.options.hooks?.onFetchError?.({ uri, err })
-          throw err
-        },
-      ))
+      const { record, cid } =
+        hookResult ?? (await this.fetchNetworkLexicon(uri, did, nsid, options))
 
-    return { uri, cid, lexicon }
+      if (!isCborCid(cid)) {
+        throw new LexResolverError(
+          nsid,
+          `Invalid CID for lexicon record at ${uri}`,
+        )
+      }
+
+      const validationResult = lexiconDocumentSchema.safeParse(record)
+      if (!validationResult.success) {
+        throw new LexResolverError(nsid, `Invalid Lexicon document at ${uri}`, {
+          cause: validationResult.reason,
+        })
+      }
+
+      const lexicon = validationResult.value
+      if (lexicon.id !== uri.rkey) {
+        throw new LexResolverError(
+          nsid,
+          `Invalid document id "${lexicon.id}" at ${uri}`,
+        )
+      }
+
+      await this.options.hooks?.onFetchResult?.call(null, {
+        did,
+        nsid,
+        uri,
+        cid,
+        lexicon,
+        source: hookResult ? 'hook' : 'network',
+      })
+
+      return { uri, cid, lexicon }
+    } catch (err) {
+      await this.options.hooks?.onFetchError?.call(null, {
+        did,
+        nsid,
+        uri,
+        err,
+      })
+
+      throw err instanceof LexResolverError
+        ? err
+        : new LexResolverError(nsid, `Failed to fetch lexicon at ${uri}`, {
+            cause: err,
+          })
+    }
   }
 
-  protected async fetchLexiconUri(
+  protected async fetchNetworkLexicon(
     uri: AtUri,
+    did: Did,
+    nsid: NSID,
     options?: ResolveDidOptions,
   ): Promise<LexResolverFetchResult> {
-    const { did, nsid } = parseLexiconUri(uri)
-
     const { pds, key } = await this.didResolver
       .resolve(did, options)
       .then(extractAtprotoData)
@@ -425,7 +506,7 @@ export class LexResolver {
         )
       })
 
-    if (!key || !pds || !URL.canParse(pds.serviceEndpoint)) {
+    if (!key || !pds || !canParseUrl(pds.serviceEndpoint)) {
       throw new LexResolverError(
         nsid,
         `No atproto PDS service endpoint or signing key found in ${did} DID document`,
@@ -440,7 +521,7 @@ export class LexResolver {
     const collection = 'com.atproto.lexicon.schema'
     const rkey = nsid.toString()
 
-    const { cid, record } = await xrpc(agent, com.atproto.sync.getRecord, {
+    return xrpc(agent, com.atproto.sync.getRecord, {
       signal: options?.signal,
       headers: options?.noCache ? { 'Cache-Control': 'no-cache' } : undefined,
       params: { did, collection, rkey },
@@ -462,38 +543,6 @@ export class LexResolver {
         })
       },
     )
-
-    const validationResult = lexiconDocumentSchema.safeParse(record)
-    if (!validationResult.success) {
-      throw new LexResolverError(nsid, `Invalid Lexicon document at ${uri}`, {
-        cause: validationResult.reason,
-      })
-    }
-
-    const lexicon = validationResult.value
-    if (lexicon.id !== uri.rkey) {
-      throw new LexResolverError(
-        nsid,
-        `Invalid document id "${lexicon.id}" at ${uri}`,
-      )
-    }
-
-    return { lexicon, cid }
-  }
-}
-
-function parseLexiconUri(uri: AtUri): {
-  did: Did
-  nsid: NSID
-} {
-  // Validate input URI
-  const nsid = NSID.from(uri.rkey)
-  try {
-    const did = uri.host
-    assertDid(did)
-    return { did, nsid }
-  } catch (cause) {
-    throw new LexResolverError(nsid, `URI host is not a DID ${uri}`, { cause })
   }
 }
 

@@ -1,4 +1,5 @@
-import { isHttpError } from 'http-errors'
+import httpErrors from 'http-errors'
+const { isHttpError } = httpErrors
 import { LexError, XrpcError } from '@atproto/lex-client'
 import { l } from '@atproto/lex-schema'
 import {

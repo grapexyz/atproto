@@ -1,26 +1,30 @@
-import { Insertable, Selectable, sql } from 'kysely'
-import { $Typed, Cid, lexParse } from '@atproto/lex'
+import { type Insertable, type Selectable, sql } from 'kysely'
+import { type $Typed, type Cid, getBlobCidString, lexParse } from '@atproto/lex'
 import { AtUri, normalizeDatetimeAlways } from '@atproto/syntax'
-import { app } from '../../../../lexicons'
+import { NOTIFICATION_REASON } from '../../../../api/app/bsky/notification/constants.js'
+import { app } from '../../../../lexicons/index.js'
 import {
   postUriToPostgateUri,
   postUriToThreadgateUri,
   uriToDid,
-} from '../../../../util/uris'
-import { RecordWithMedia } from '../../../../views/types'
-import { parsePostgate } from '../../../../views/util'
-import { BackgroundQueue } from '../../background'
-import { Database } from '../../db'
-import { DatabaseSchema, DatabaseSchemaType } from '../../db/database-schema'
-import { Notification } from '../../db/tables/notification'
-import { countAll, excluded } from '../../db/util'
+} from '../../../../util/uris.js'
+import type { RecordWithMedia } from '../../../../views/types.js'
+import { parsePostgate } from '../../../../views/util.js'
+import type { BackgroundQueue } from '../../background.js'
+import type {
+  DatabaseSchema,
+  DatabaseSchemaType,
+} from '../../db/database-schema.js'
+import type { Database } from '../../db/index.js'
+import type { Notification } from '../../db/tables/notification.js'
+import { countAll, excluded } from '../../db/util.js'
 import {
   getAncestorsAndSelfQb,
   getDescendentsQb,
   invalidReplyRoot as checkInvalidReplyRoot,
   violatesThreadGate as checkViolatesThreadGate,
-} from '../../util'
-import { RecordProcessor } from '../processor'
+} from '../../util.js'
+import { RecordProcessor } from '../processor.js'
 
 type Notif = Insertable<Notification>
 type Post = Selectable<DatabaseSchemaType['post']>
@@ -28,6 +32,7 @@ type PostEmbedImage = DatabaseSchemaType['post_embed_image']
 type PostEmbedExternal = DatabaseSchemaType['post_embed_external']
 type PostEmbedRecord = DatabaseSchemaType['post_embed_record']
 type PostEmbedVideo = DatabaseSchemaType['post_embed_video']
+type PostEmbedGalleryImage = DatabaseSchemaType['post_embed_gallery_image']
 type PostAncestor = {
   uri: string
   height: number
@@ -47,6 +52,7 @@ type IndexedPost = {
     | PostEmbedExternal
     | PostEmbedRecord
     | PostEmbedVideo
+    | PostEmbedGalleryImage[]
   )[]
   ancestors?: PostAncestor[]
   descendents?: PostDescendent[]
@@ -119,6 +125,20 @@ const insertFn = async (
         .set({ invalidReplyRoot, violatesThreadGate })
         .executeTakeFirst()
     }
+    // Denormalized OP replies per thread, mirroring the production dataplane.
+    // Includes all OP replies, regardless of where they occur in the tree.
+    if (obj.reply.parent.uri && post.creator === uriToDid(obj.reply.root.uri)) {
+      await db
+        .insertInto('op_thread_reply')
+        .values({
+          rootUri: obj.reply.root.uri,
+          parentUri: obj.reply.parent.uri,
+          uri: post.uri,
+          deletedAt: null,
+        })
+        .onConflict((oc) => oc.doNothing())
+        .execute()
+    }
   }
 
   const facets = (obj.facets || [])
@@ -144,6 +164,7 @@ const insertFn = async (
     | PostEmbedExternal
     | PostEmbedRecord
     | PostEmbedVideo
+    | PostEmbedGalleryImage[]
   )[] = []
   const postEmbeds = separateEmbeds(obj.embed)
   for (const postEmbed of postEmbeds) {
@@ -152,7 +173,7 @@ const insertFn = async (
       const imagesEmbed = images.map((img, i) => ({
         postUri: uri.toString(),
         position: i,
-        imageCid: img.image.ref.toString(),
+        imageCid: getBlobCidString(img.image),
         alt: img.alt,
       }))
       embeds.push(imagesEmbed)
@@ -164,7 +185,7 @@ const insertFn = async (
         uri: external.uri,
         title: external.title,
         description: external.description,
-        thumbCid: external.thumb?.ref.toString() || null,
+        thumbCid: getBlobCidString(external.thumb) || null,
       }
       embeds.push(externalEmbed)
       await db.insertInto('post_embed_external').values(externalEmbed).execute()
@@ -231,13 +252,34 @@ const insertFn = async (
       const { video } = postEmbed
       const videoEmbed = {
         postUri: uri.toString(),
-        videoCid: video.ref.toString(),
+        videoCid: getBlobCidString(video),
         // @NOTE: alt is required for image but not for video on the lexicon.
         alt: postEmbed.alt ?? null,
       }
       embeds.push(videoEmbed)
 
       await db.insertInto('post_embed_video').values(videoEmbed).execute()
+    } else if (app.bsky.embed.gallery.$matches(postEmbed)) {
+      // Gallery items are a union; today only `#image` exists, but we
+      // defensively skip unknown variants for forward-compat.
+      const galleryImages: PostEmbedGalleryImage[] = []
+      postEmbed.items.forEach((item, i) => {
+        if (app.bsky.embed.gallery.image.$matches(item)) {
+          galleryImages.push({
+            postUri: uri.toString(),
+            position: i,
+            imageCid: getBlobCidString(item.image),
+            alt: item.alt,
+          })
+        }
+      })
+      if (galleryImages.length > 0) {
+        embeds.push(galleryImages)
+        await db
+          .insertInto('post_embed_gallery_image')
+          .values(galleryImages)
+          .execute()
+      }
     }
   }
 
@@ -285,7 +327,7 @@ const notifsForInsert = (obj: IndexedPost) => {
     if (facet.type === 'mention') {
       maybeNotify({
         did: facet.value,
-        reason: 'mention',
+        reason: NOTIFICATION_REASON.MENTION,
         author: obj.post.creator,
         recordUri: obj.post.uri,
         recordCid: obj.post.cid,
@@ -301,7 +343,7 @@ const notifsForInsert = (obj: IndexedPost) => {
         if (embedUri.collection === app.bsky.feed.post.$type) {
           maybeNotify({
             did: embedUri.host,
-            reason: 'quote',
+            reason: NOTIFICATION_REASON.QUOTE,
             reasonSubject: embedUri.toString(),
             author: obj.post.creator,
             recordUri: obj.post.uri,
@@ -328,7 +370,7 @@ const notifsForInsert = (obj: IndexedPost) => {
       const ancestorUri = new AtUri(ancestor.uri)
       maybeNotify({
         did: ancestorUri.host,
-        reason: 'reply',
+        reason: NOTIFICATION_REASON.REPLY,
         reasonSubject: ancestorUri.toString(),
         author: obj.post.creator,
         recordUri: obj.post.uri,
@@ -349,7 +391,7 @@ const notifsForInsert = (obj: IndexedPost) => {
         const ancestorUri = new AtUri(ancestor.uri)
         maybeNotify({
           did: ancestorUri.host,
-          reason: 'reply',
+          reason: NOTIFICATION_REASON.REPLY,
           reasonSubject: ancestorUri.toString(),
           author: descendent.creator,
           recordUri: descendent.uri,
@@ -375,14 +417,30 @@ const deleteFn = async (
       .returningAll()
       .executeTakeFirst(),
     db.deleteFrom('feed_item').where('postUri', '=', uriStr).executeTakeFirst(),
+    // Soft delete rather than remove, mirroring the production dataplane: the
+    // OP thread walk can still route through a deleted reply to replies that
+    // outlive it.
+    db
+      .updateTable('op_thread_reply')
+      .where('uri', '=', uriStr)
+      .set({ deletedAt: new Date().toISOString() })
+      .executeTakeFirst(),
   ])
   await db.deleteFrom('quote').where('subject', '=', uriStr).execute()
   const deletedEmbeds: (
     | PostEmbedImage[]
     | PostEmbedExternal
     | PostEmbedRecord
+    | PostEmbedVideo
+    | PostEmbedGalleryImage[]
   )[] = []
-  const [deletedImgs, deletedExternals, deletedPosts] = await Promise.all([
+  const [
+    deletedImgs,
+    deletedExternals,
+    deletedPosts,
+    deletedVideo,
+    deletedGalleryImgs,
+  ] = await Promise.all([
     db
       .deleteFrom('post_embed_image')
       .where('postUri', '=', uriStr)
@@ -398,12 +456,28 @@ const deleteFn = async (
       .where('postUri', '=', uriStr)
       .returningAll()
       .executeTakeFirst(),
+    db
+      .deleteFrom('post_embed_video')
+      .where('postUri', '=', uriStr)
+      .returningAll()
+      .executeTakeFirst(),
+    db
+      .deleteFrom('post_embed_gallery_image')
+      .where('postUri', '=', uriStr)
+      .returningAll()
+      .execute(),
   ])
   if (deletedImgs.length) {
     deletedEmbeds.push(deletedImgs)
   }
   if (deletedExternals) {
     deletedEmbeds.push(deletedExternals)
+  }
+  if (deletedVideo) {
+    deletedEmbeds.push(deletedVideo)
+  }
+  if (deletedGalleryImgs.length) {
+    deletedEmbeds.push(deletedGalleryImgs)
   }
   if (deletedPosts) {
     const embedUri = new AtUri(deletedPosts.embedUri)
@@ -457,10 +531,11 @@ const updateAggregates = async (db: DatabaseSchema, postIdx: IndexedPost) => {
           replyCount: db
             .selectFrom('post')
             .where('post.replyParent', '=', postIdx.post.replyParent)
-            .where((qb) =>
-              qb
-                .where('post.violatesThreadGate', 'is', null)
-                .orWhere('post.violatesThreadGate', '=', false),
+            .where((eb) =>
+              eb.or([
+                eb('post.violatesThreadGate', 'is', null),
+                eb('post.violatesThreadGate', '=', false),
+              ]),
             )
             .select(countAll.as('count')),
         })
@@ -486,7 +561,10 @@ const updateAggregates = async (db: DatabaseSchema, postIdx: IndexedPost) => {
 }
 
 export type PluginType = ReturnType<typeof makePlugin>
-export const makePlugin = (db: Database, background: BackgroundQueue) => {
+export const makePlugin = (
+  db: Database,
+  background: BackgroundQueue<Database>,
+) => {
   return new RecordProcessor(db, background, {
     schema: app.bsky.feed.post.main,
     insertFn,

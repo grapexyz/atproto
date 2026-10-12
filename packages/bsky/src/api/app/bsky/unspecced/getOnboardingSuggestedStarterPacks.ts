@@ -1,22 +1,23 @@
 import { mapDefined, noUndefinedVals } from '@atproto/common'
-import { Client } from '@atproto/lex'
-import { AtUri, AtUriString, DidString } from '@atproto/syntax'
-import { MethodNotImplementedError, Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
+import type { Client } from '@atproto/lex'
+import { AtUri, type AtUriString, type DidString } from '@atproto/syntax'
+import { MethodNotImplementedError, type Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
 import {
-  HydrateCtx,
-  Hydrator,
+  type HydrateCtx,
+  type Hydrator,
   mergeManyStates,
-} from '../../../../hydration/hydrator'
+} from '../../../../hydration/hydrator.js'
 import { app } from '../../../../lexicons/index.js'
 import {
-  HydrationFn,
-  PresentationFn,
-  RulesFn,
-  SkeletonFn,
+  type HydrationFn,
+  type PresentationFn,
+  type RulesFn,
+  type SkeletonFn,
   createPipeline,
-} from '../../../../pipeline'
-import { Views } from '../../../../views'
+} from '../../../../pipeline.js'
+import { getAtprotoPassthroughHeaders } from '../../../../util/headers.js'
+import type { Views } from '../../../../views/index.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getOnboardingSuggestedStarterPacks = createPipeline(
@@ -27,21 +28,26 @@ export default function (server: Server, ctx: AppContext) {
   )
   server.add(app.bsky.unspecced.getOnboardingSuggestedStarterPacks, {
     auth: ctx.authVerifier.standardOptional,
-    handler: async ({ auth, params, req }) => {
+    handler: async ({ auth, params, req, signal }) => {
       const viewer = auth.credentials.iss
       const labelers = ctx.reqLabelers(req)
-      const hydrateCtx = await ctx.hydrator.createContext({ labelers, viewer })
+      const hydrateCtx = await ctx.hydrator.createContext({
+        labelers,
+        viewer,
+        features: ctx.featureGatesClient.scope(
+          ctx.featureGatesClient.parseUserContextFromHandler({ viewer, req }),
+        ),
+      })
       const headers = noUndefinedVals({
         'accept-language': req.headers['accept-language'],
-        'x-bsky-topics': Array.isArray(req.headers['x-bsky-topics'])
-          ? req.headers['x-bsky-topics'].join(',')
-          : req.headers['x-bsky-topics'],
+        ...getAtprotoPassthroughHeaders(req),
       })
       const result = await getOnboardingSuggestedStarterPacks(
         {
           ...params,
           hydrateCtx,
           headers,
+          signal,
         },
         ctx,
       )
@@ -58,15 +64,21 @@ const skeleton: SkeletonFn<Context, Params, SkeletonState> = async (
 ): Promise<SkeletonState> => {
   const { params, ctx } = input
 
-  if (!ctx.topicsClient) {
+  const useIris = params.hydrateCtx.features.checkGate(
+    params.hydrateCtx.features.Gate.SuggestedStarterPacksOnboardingV2Enable,
+  )
+  const client = useIris ? ctx.irisClient : ctx.topicsClient
+
+  if (!client) {
     // Use 501 instead of 500 as these are not considered retry-able by clients
-    throw new MethodNotImplementedError('Topics agent not available')
+    const agent = useIris ? 'Iris' : 'Topics'
+    throw new MethodNotImplementedError(`${agent} agent not available`)
   }
 
-  const skeleton = await ctx.topicsClient.call(
+  const skeleton = await client.call(
     app.bsky.unspecced.getOnboardingSuggestedStarterPacksSkeleton,
     { limit: params.limit, viewer: params.hydrateCtx.viewer ?? undefined },
-    { headers: params.headers },
+    { headers: params.headers, signal: params.signal },
   )
 
   // @TODO Make sure upstream always provides this
@@ -102,6 +114,7 @@ const noBlocks: RulesFn<Context, Params, SkeletonState> = (input) => {
 
   const blocks = hydration.bidirectionalBlocks?.get(viewer)
   const filteredSkeleton: SkeletonState = {
+    ...skeleton,
     starterPacks: skeleton.starterPacks.filter((uri) => {
       try {
         return !blocks?.get(new AtUri(uri).did)
@@ -126,6 +139,7 @@ const presentation: PresentationFn<
     starterPacks: mapDefined(skeleton.starterPacks, (uri) =>
       ctx.views.starterPack(uri, hydration),
     ),
+    recIdStr: skeleton.recIdStr,
   }
 }
 
@@ -133,11 +147,13 @@ type Context = {
   hydrator: Hydrator
   views: Views
   topicsClient: Client | undefined
+  irisClient: Client | undefined
 }
 
 type Params = app.bsky.unspecced.getOnboardingSuggestedStarterPacks.$Params & {
   hydrateCtx: HydrateCtx
   headers: Record<string, string>
+  signal: AbortSignal
 }
 
 type SkeletonState =

@@ -1,20 +1,28 @@
 import events from 'node:events'
-import http from 'node:http'
+import type http from 'node:http'
 import * as plc from '@did-plc/lib'
-import getPort from 'get-port'
+import { type HttpTerminator, createHttpTerminator } from 'http-terminator'
 import { Secp256k1Keypair } from '@atproto/crypto'
-import { SkeletonHandler, app } from '@atproto/pds'
-import { AtUriString, DidString } from '@atproto/syntax'
+import { type SkeletonHandler, app } from '@atproto/pds'
+import type { AtUriString, DidString } from '@atproto/syntax'
 import { InvalidRequestError, createServer } from '@atproto/xrpc-server'
+import getPort from './get-port.js'
 
 export class TestFeedGen {
-  destroyed = false
+  private terminator: HttpTerminator
+  private terminatorPromise?: Promise<void>
+
+  get destroyed() {
+    return this.terminatorPromise != null
+  }
 
   constructor(
     public port: number,
     public server: http.Server,
     public did: string,
-  ) {}
+  ) {
+    this.terminator = createHttpTerminator({ server })
+  }
 
   static async create(
     plcUrl: string,
@@ -50,14 +58,11 @@ export class TestFeedGen {
   }
 
   close(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (this.destroyed) return resolve()
-      this.server.close((err) => {
-        if (err) return reject(err)
-        this.destroyed = true
-        resolve()
-      })
-    })
+    return (this.terminatorPromise ??= this.terminator.terminate())
+  }
+
+  async [Symbol.asyncDispose]() {
+    await this.close()
   }
 }
 

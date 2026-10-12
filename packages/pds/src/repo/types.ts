@@ -1,6 +1,6 @@
-import { BlobRef, Cid, LexMap } from '@atproto/lex-data'
-import { BlockMap, CommitData, WriteOpAction } from '@atproto/repo'
-import { AtUri } from '@atproto/syntax'
+import type { Cid, LexMap, TypedBlobRef } from '@atproto/lex-data'
+import type { BlockMap, CommitData, WriteOpAction } from '@atproto/repo'
+import type { AtUri } from '@atproto/syntax'
 
 export type ValidationStatus = 'valid' | 'unknown'
 
@@ -10,7 +10,7 @@ export type PreparedCreate = {
   cid: Cid
   swapCid?: Cid | null
   record: LexMap
-  blobs: BlobRef[]
+  blobs: TypedBlobRef[]
   validationStatus?: ValidationStatus
 }
 
@@ -20,7 +20,7 @@ export type PreparedUpdate = {
   cid: Cid
   swapCid?: Cid | null
   record: LexMap
-  blobs: BlobRef[]
+  blobs: TypedBlobRef[]
   validationStatus?: ValidationStatus
 }
 

@@ -1,16 +1,32 @@
 import assert from 'node:assert'
 import {
-  $Typed,
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
+import {
+  type $Typed,
   AppBskyBookmarkCreateBookmark,
-  AppBskyBookmarkDefs,
+  type AppBskyBookmarkDefs,
   AppBskyBookmarkDeleteBookmark,
-  AppBskyBookmarkGetBookmarks,
+  type AppBskyBookmarkGetBookmarks,
   AppBskyFeedDefs,
-  AtpAgent,
+  type AtpAgent,
   ids,
 } from '@atproto/api'
-import { RecordRef, SeedClient, TestNetwork, basicSeed } from '@atproto/dev-env'
-import { forSnapshot, paginateAll } from '../_util'
+import {
+  type RecordRef,
+  type SeedClient,
+  TestNetwork,
+  basicSeed,
+} from '@atproto/dev-env'
+import type { DidString } from '@atproto/syntax'
+import { forSnapshot, paginateAll } from '../_util.js'
 
 type Database = TestNetwork['bsky']['db']
 
@@ -21,10 +37,10 @@ describe('appview bookmarks views', () => {
   let db: Database
 
   // account dids, for convenience
-  let alice: string
-  let bob: string
-  let carol: string
-  let dan: string
+  let alice: DidString
+  let bob: DidString
+  let carol: DidString
+  let dan: DidString
 
   beforeAll(async () => {
     network = await TestNetwork.create({
@@ -34,7 +50,6 @@ describe('appview bookmarks views', () => {
     agent = network.bsky.getAgent()
     sc = network.getSeedClient()
     await basicSeed(sc)
-    await network.processAll()
 
     alice = sc.dids.alice
     bob = sc.dids.bob
@@ -42,15 +57,18 @@ describe('appview bookmarks views', () => {
     dan = sc.dids.dan
   })
 
+  beforeEach(async () => network.processAll())
+
   afterEach(async () => {
-    jest.resetAllMocks()
+    vi.resetAllMocks()
+    // Drain pending bsync ops before clearing, so a stale op can't land after
+    // the reset.
+    await network.processAll()
     await clearPrivateData(db)
     await clearBookmarks(db)
   })
 
-  afterAll(async () => {
-    await network.close()
-  })
+  afterAll(async () => network?.close())
 
   const get = async (actor: string, limit?: number, cursor?: string) =>
     agent.app.bsky.bookmark.getBookmarks(
@@ -104,6 +122,7 @@ describe('appview bookmarks views', () => {
 
       await create(bob, sc.posts[bob][0].ref)
       await create(bob, sc.posts[carol][0].ref)
+      await network.processAll()
 
       const { data: dataAlice } = await get(alice)
       expect(dataAlice.bookmarks).toHaveLength(3)
@@ -116,10 +135,12 @@ describe('appview bookmarks views', () => {
       const uri = sc.posts[alice][0].ref
 
       await create(alice, uri)
+      await network.processAll()
       const { data: data0 } = await get(alice)
       expect(data0.bookmarks).toHaveLength(1)
 
       await create(alice, uri)
+      await network.processAll()
       const { data: data1 } = await get(alice)
       expect(data1.bookmarks).toHaveLength(1)
     })
@@ -137,12 +158,14 @@ describe('appview bookmarks views', () => {
       await create(alice, sc.posts[alice][0].ref)
       await create(alice, sc.posts[bob][0].ref)
       await create(alice, sc.posts[carol][0].ref)
+      await network.processAll()
 
       const { data: dataBefore } = await get(alice)
       expect(dataBefore.bookmarks).toHaveLength(3)
 
       await del(alice, sc.posts[alice][0].ref)
       await del(alice, sc.posts[carol][0].ref)
+      await network.processAll()
 
       const { data: dataAfter } = await get(alice)
       expect(dataAfter.bookmarks).toHaveLength(1)
@@ -151,12 +174,17 @@ describe('appview bookmarks views', () => {
     it('is idempotent', async () => {
       const uri = sc.posts[alice][0].ref
       await create(alice, uri)
+      // deleteBookmark resolves the bookmark's key from indexed state, so the
+      // create must be indexed before the delete is issued.
+      await network.processAll()
 
       await del(alice, uri)
+      await network.processAll()
       const { data: data0 } = await get(alice)
       expect(data0.bookmarks).toHaveLength(0)
 
       await del(alice, uri)
+      await network.processAll()
       const { data: data1 } = await get(alice)
       expect(data1.bookmarks).toHaveLength(0)
     })
@@ -182,12 +210,14 @@ describe('appview bookmarks views', () => {
       expect(postBefore.viewer?.bookmarked).toBe(false)
 
       await create(alice, ref)
+      await network.processAll()
       const postAfterCreate = await getPost(alice, ref)
       expect(postAfterCreate.viewer?.bookmarked).toBe(true)
       const postAfterCreateForBob = await getPost(bob, ref)
       expect(postAfterCreateForBob.viewer?.bookmarked).toBe(false)
 
       await del(alice, ref)
+      await network.processAll()
       const postAfterDel = await getPost(alice, ref)
       expect(postAfterDel.viewer?.bookmarked).toBe(false)
     })
@@ -200,16 +230,19 @@ describe('appview bookmarks views', () => {
 
       await create(alice, uri)
       await create(carol, uri)
+      await network.processAll()
       const postAfterCreate = await getPost(alice, uri)
       expect(postAfterCreate.bookmarkCount).toBe(2)
       const postAfterCreateForBob = await getPost(bob, uri)
       expect(postAfterCreateForBob.bookmarkCount).toBe(2)
 
       await del(alice, uri)
+      await network.processAll()
       const postAfterAliceDel = await getPost(alice, uri)
       expect(postAfterAliceDel.bookmarkCount).toBe(1)
 
       await del(carol, uri)
+      await network.processAll()
       const postAfterCarolDel = await getPost(carol, uri)
       expect(postAfterCarolDel.bookmarkCount).toBe(0)
     })
@@ -222,6 +255,7 @@ describe('appview bookmarks views', () => {
       await create(alice, sc.posts[carol][0].ref)
       await create(alice, sc.posts[dan][0].ref)
       await create(alice, sc.posts[dan][1].ref)
+      await network.processAll()
 
       const results = (out: AppBskyBookmarkGetBookmarks.OutputSchema[]) =>
         out.flatMap((res) => res.bookmarks)
@@ -238,6 +272,8 @@ describe('appview bookmarks views', () => {
       paginatedRes.forEach((res) =>
         expect(res.bookmarks.length).toBeLessThanOrEqual(2),
       )
+      expect(paginatedRes[0].cursor).toBeDefined()
+      expect(paginatedRes.at(-1)?.cursor).toBeUndefined()
 
       const full = results([fullRes.data])
       assertPostViews(full)
@@ -261,6 +297,63 @@ describe('appview bookmarks views', () => {
         uri: sc.posts[alice][0].ref.uriStr,
         cid: sc.posts[alice][0].ref.cidStr,
       })
+    })
+
+    it('only returns a dataplane cursor when another bookmark exists', async () => {
+      for (const post of [
+        sc.posts[alice][0],
+        sc.posts[alice][1],
+        sc.posts[bob][0],
+      ]) {
+        await create(alice, post.ref)
+      }
+      await network.processAll()
+
+      const exact = await network.bsky.ctx.dataplane.getActorBookmarks({
+        actorDid: alice,
+        limit: 3,
+      })
+      const nonterminal = await network.bsky.ctx.dataplane.getActorBookmarks({
+        actorDid: alice,
+        limit: 2,
+      })
+
+      expect(exact.bookmarks).toHaveLength(3)
+      expect(exact.cursor).toBe('')
+      expect(nonterminal.bookmarks).toHaveLength(2)
+      expect(nonterminal.cursor).not.toBe('')
+    })
+
+    it('fills a page after unsupported bookmarked records are filtered', async () => {
+      const older = await sc.post(alice, 'older bookmarked post')
+      const newer = await sc.post(alice, 'newer bookmarked post')
+      const filtered1 = await sc.post(alice, 'filtered bookmarked post 1')
+      const filtered2 = await sc.post(alice, 'filtered bookmarked post 2')
+      for (const post of [older, newer, filtered1, filtered2]) {
+        await create(alice, post.ref)
+      }
+      await network.processAll()
+      for (const [post, unsupported] of [
+        [filtered1, sc.follows[alice][bob]],
+        [filtered2, sc.follows[alice][carol]],
+      ] as const) {
+        await db.db
+          .updateTable('bookmark')
+          .set({
+            subjectUri: unsupported.uriStr,
+            subjectCid: unsupported.cidStr,
+          })
+          .where('subjectUri', '=', post.ref.uriStr)
+          .execute()
+      }
+
+      const { data } = await get(alice, 2)
+
+      expect(data.bookmarks.map((bookmark) => bookmark.subject.uri)).toEqual([
+        newer.ref.uriStr,
+        older.ref.uriStr,
+      ])
+      expect(data.cursor).toBeUndefined()
     })
 
     it('shows posts and blocked posts correctly', async () => {

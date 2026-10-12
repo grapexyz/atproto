@@ -1,18 +1,21 @@
 import { mapDefined } from '@atproto/common'
-import { Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
-import { HydrateCtx, Hydrator } from '../../../../hydration/hydrator'
+import type { Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
+import type {
+  HydrateCtxWithViewer,
+  Hydrator,
+} from '../../../../hydration/hydrator.js'
 import { app } from '../../../../lexicons/index.js'
 import {
-  HydrationFnInput,
-  PresentationFnInput,
-  SkeletonFnInput,
+  type HydrationFnInput,
+  type PresentationFnInput,
+  type SkeletonFnInput,
   createPipeline,
   noRules,
-} from '../../../../pipeline'
-import { BookmarkInfo } from '../../../../proto/bsky_pb'
-import { Views } from '../../../../views'
-import { resHeaders } from '../../../util'
+} from '../../../../pipeline.js'
+import type { BookmarkInfo } from '../../../../proto/bsky_pb.js'
+import type { Views } from '../../../../views/index.js'
+import { fillPage, resHeaders } from '../../../util.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getBookmarks = createPipeline(
@@ -31,10 +34,13 @@ export default function (server: Server, ctx: AppContext) {
         viewer,
       })
 
-      const result = await getBookmarks(
-        { ...params, hydrateCtx: hydrateCtx.copy({ viewer }) },
-        ctx,
-      )
+      const result = await fillPage({
+        cursor: params.cursor,
+        limit: params.limit,
+        fetch: ({ cursor, limit }) =>
+          getBookmarks({ ...params, cursor, limit, hydrateCtx }, ctx),
+        items: (r) => r.bookmarks,
+      })
 
       return {
         encoding: 'application/json',
@@ -58,7 +64,7 @@ const skeleton = async (
   return {
     actorDid,
     bookmarkInfos: bookmarks,
-    cursor: cursor || undefined,
+    cursor,
   }
 }
 
@@ -87,7 +93,7 @@ type Context = {
 }
 
 type Params = app.bsky.bookmark.getBookmarks.$Params & {
-  hydrateCtx: HydrateCtx & { viewer: string }
+  hydrateCtx: HydrateCtxWithViewer
 }
 
 type SkeletonState = {

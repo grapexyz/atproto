@@ -1,83 +1,117 @@
 import assert from 'node:assert'
-import { mapDefined } from '@atproto/common'
-import { AtUri, AtUriString, DidString, UriString } from '@atproto/syntax'
-import { DataPlaneClient } from '../data-plane/client'
-import { FeatureGatesClient, ScopedFeatureGatesClient } from '../feature-gates'
-import { app, chat, com } from '../lexicons/index.js'
-import { hydrationLogger } from '../logger'
+import { chunkArray, dedupeStrs, mapDefined } from '@atproto/common'
+import { type NsidString, atUri, isDidString } from '@atproto/lex'
 import {
+  AtUri,
+  type AtUriString,
+  type DidString,
+  type UriString,
+  parseAtUriString,
+} from '@atproto/syntax'
+import { NOTIFICATION_REASON } from '../api/app/bsky/notification/constants.js'
+import type { RawNotification } from '../api/app/bsky/notification/grouping/grouping.js'
+import type { DataPlaneClient } from '../data-plane/client/index.js'
+import type {
+  FeatureGatesClient,
+  ScopedFeatureGatesClient,
+} from '../feature-gates/index.js'
+import { app, chat, com, place, site, social } from '../lexicons/index.js'
+import { hydrationLogger } from '../logger.js'
+import type {
   Bookmark as BookmarkLex,
   BookmarkInfo,
   Notification,
   RecordRef,
-} from '../proto/bsky_pb'
-import { ParsedLabelers } from '../util'
-import { uriToDid, uriToDid as didFromUri } from '../util/uris'
+} from '../proto/bsky_pb.js'
+import { events } from '../telemetry/events.js'
+import { SITE_STANDARD_NSID_PREFIX } from '../util/external/standard-site.js'
+import { uriToDid, uriToDid as didFromUri } from '../util/uris.js'
+import type { ParsedLabelers } from '../util.js'
+import { MAX_PROFILE_LINKS } from '../views/profile-link-rules.js'
 import {
-  ProfileRecord,
+  type ProfileRecord,
+  isExternalEmbedType,
   isListRuleType,
   isRecordEmbedType,
   isRecordWithMediaType,
 } from '../views/types.js'
 import {
-  ActivitySubscriptionStates,
+  type ActivitySubscriptionStates,
   ActorHydrator,
-  Actors,
-  KnownFollowersStates,
-  ProfileAggs,
-  ProfileViewerState,
-  ProfileViewerStates,
-} from './actor'
+  type Actors,
+  type KnownFollowersStates,
+  type KnownLikersStates,
+  type ProfileAggs,
+  type ProfileLinks,
+  type ProfileViewerState,
+  type ProfileViewerStates,
+} from './actor.js'
 import {
-  FeedGenAggs,
-  FeedGenViewerStates,
-  FeedGens,
+  type ExactRecordKey,
+  type ExternalHydrationTracker,
+  ExternalHydrator,
+  type ExternalRecordBacklinkCounts,
+  type ExternalRecordBacklinks,
+  type ExternalRecords,
+  type ExternalRecordsByRef,
+  type SiteStandardDocuments,
+  type SiteStandardPublications,
+  actionExternalRecordTakedowns,
+  genericRecordKey,
+  parseGenericRecordKey,
+  trackExternalHydration,
+} from './external.js'
+import {
+  type FeedGenAggs,
+  type FeedGenViewerStates,
+  type FeedGens,
   FeedHydrator,
-  FeedItem,
+  type FeedItem,
   type GetPostsHydrationOptions,
-  Likes,
-  Post,
-  PostAggs,
-  PostViewerStates,
-  Postgates,
-  Posts,
-  Reposts,
-  ThreadContexts,
-  ThreadRef,
-  Threadgates,
-} from './feed'
+  type Likes,
+  type Post,
+  type PostAggs,
+  type PostViewerStates,
+  type Postgates,
+  type Posts,
+  type Reposts,
+  type ThreadContexts,
+  type ThreadRef,
+  type Threadgates,
+} from './feed.js'
 import {
-  BlockEntry,
-  Follows,
+  type BlockEntry,
+  type Follows,
   GraphHydrator,
-  ListAggs,
-  ListItems,
-  ListMembershipState,
-  ListMembershipStates,
-  ListViewerStates,
-  Lists,
-  RelationshipPair,
-  StarterPackAggs,
-  StarterPacks,
-  Verifications,
-} from './graph'
+  type ListAggs,
+  type ListItems,
+  type ListMembershipState,
+  type ListMembershipStates,
+  type ListViewerStates,
+  type Lists,
+  type RelationshipPair,
+  type StarterPackAggs,
+  type StarterPacks,
+  type Verifications,
+} from './graph.js'
 import {
   LabelHydrator,
-  LabelerAggs,
-  LabelerViewerStates,
-  Labelers,
+  type LabelerAggs,
+  type LabelerViewerStates,
+  type Labelers,
   Labels,
-} from './label'
+} from './label.js'
 import {
   HydrationMap,
-  ItemRef,
-  RecordInfo,
+  type ItemRef,
+  type RecordInfo,
+  getStarterPackUriFromFollow,
   mergeManyMaps,
   mergeMaps,
   mergeNestedMaps,
   parseDate,
   urisByCollection,
-} from './util'
+} from './util.js'
 
 export class HydrateCtx {
   labelers = this.vals.labelers
@@ -85,6 +119,7 @@ export class HydrateCtx {
   includeTakedowns = this.vals.includeTakedowns
   overrideIncludeTakedownsForActor = this.vals.overrideIncludeTakedownsForActor
   include3pBlocks = this.vals.include3pBlocks
+  skipViewerBlocks = this.vals.skipViewerBlocks
   includeDebugField = this.vals.includeDebugField
   features = this.vals.features
   constructor(private vals: HydrateCtxVals) {}
@@ -98,15 +133,20 @@ export class HydrateCtx {
   }
 }
 
+export type HydrateCtxWithViewer = HydrateCtx & { viewer: string }
+
 export type HydrateCtxVals = {
   labelers: ParsedLabelers
   viewer: DidString | null
   includeTakedowns?: boolean
   overrideIncludeTakedownsForActor?: boolean
   include3pBlocks?: boolean
+  skipViewerBlocks?: boolean
   includeDebugField?: boolean
   features: ScopedFeatureGatesClient
 }
+
+export type ListItemSubjectOptOuts = HydrationMap<AtUriString, true>
 
 export type HydrationState = {
   ctx?: HydrateCtx
@@ -128,6 +168,7 @@ export type HydrationState = {
   listMemberships?: ListMembershipStates
   listViewers?: ListViewerStates
   listItems?: ListItems
+  listItemSubjectOptOuts?: ListItemSubjectOptOuts
   likes?: Likes
   likeBlocks?: LikeBlocks
   labels?: Labels
@@ -136,15 +177,53 @@ export type HydrationState = {
   feedgenAggs?: FeedGenAggs
   starterPacks?: StarterPacks
   starterPackAggs?: StarterPackAggs
+  profileLinks?: ProfileLinks
   labelers?: Labelers
   labelerViewers?: LabelerViewerStates
   labelerAggs?: LabelerAggs
   knownFollowers?: KnownFollowersStates
+  knownLikers?: KnownLikersStates
   activitySubscriptions?: ActivitySubscriptionStates
   bidirectionalBlocks?: BidirectionalBlocks
   verifications?: Verifications
   bookmarks?: Bookmarks
+  externalRecords?: ExternalRecords
+  externalRecordsByRef?: ExternalRecordsByRef
+  /** Available backlink source URIs per target, potentially from a partial page. */
+  externalRecordBacklinks?: ExternalRecordBacklinks
+  externalRecordBacklinkCounts?: ExternalRecordBacklinkCounts
+  siteStandardDocuments?: SiteStandardDocuments
+  siteStandardPublications?: SiteStandardPublications
 }
+
+type HydrateKnownLikersOptions = {
+  subjectUris: AtUriString[]
+}
+
+type HydratePostsOptions = Pick<
+  GetPostsHydrationOptions,
+  'processDynamicTagsForView'
+> & {
+  knownLikers?: HydrateKnownLikersOptions
+}
+
+type HydrateFeedItemsOptions = {
+  /**
+   * Hydrate known likers for the root post of each feed item, which is the
+   * post itself when it does not reply to anything. Feed items only carry the
+   * post URI, so the roots can only be resolved once the post records are
+   * fetched, which is why this is a flag rather than a list of subjects.
+   */
+  knownLikers?: boolean
+}
+
+export type HydrateProfilesOptions = {
+  // when set, restricts known followers hydration to this subset of dids
+  knownFollowersDids?: DidString[]
+  activitySubscriptions?: boolean
+}
+
+type ProfileHydrationLevel = 'basic' | 'profile' | 'detailed'
 
 export type PostBlock = { embed: boolean; parent: boolean; root: boolean }
 export type PostBlocks = HydrationMap<AtUriString, PostBlock>
@@ -186,6 +265,7 @@ export type HydratorConfig = {
 
 export class Hydrator {
   actor: ActorHydrator
+  external: ExternalHydrator
   feed: FeedHydrator
   graph: GraphHydrator
   label: LabelHydrator
@@ -199,6 +279,7 @@ export class Hydrator {
   ) {
     this.config = config
     this.actor = new ActorHydrator(dataplane)
+    this.external = new ExternalHydrator(dataplane)
     this.feed = new FeedHydrator(dataplane)
     this.graph = new GraphHydrator(dataplane)
     this.label = new LabelHydrator(dataplane)
@@ -241,6 +322,164 @@ export class Hydrator {
   async hydrateProfiles(
     dids: DidString[],
     ctx: HydrateCtx,
+    opts?: HydrateProfilesOptions,
+  ): Promise<HydrationState> {
+    return this.hydrateProfilesWorker(dids, ctx, 'profile', opts)
+  }
+
+  // app.bsky.actor.defs#profileViewBasic
+  // - profile basic
+  //   - profile
+  //     - list basic
+  async hydrateProfilesBasic(
+    dids: DidString[],
+    ctx: HydrateCtx,
+    opts?: HydrateProfilesOptions,
+  ): Promise<HydrationState> {
+    return this.hydrateProfilesWorker(dids, ctx, 'basic', opts)
+  }
+
+  // app.bsky.actor.defs#profileViewDetailed
+  // - profile detailed
+  //   - profile
+  //     - list basic
+  //   - starterpack
+  //     - profile
+  //       - list basic
+  //     - labels
+  async hydrateProfilesDetailed(
+    dids: DidString[],
+    ctx: HydrateCtx,
+    opts?: HydrateProfilesOptions,
+  ): Promise<HydrationState> {
+    return this.hydrateProfilesWorker(dids, ctx, 'detailed', opts)
+  }
+
+  private async hydrateProfilesWorker(
+    dids: DidString[],
+    ctx: HydrateCtx,
+    level: ProfileHydrationLevel,
+    opts?: HydrateProfilesOptions,
+  ): Promise<HydrationState> {
+    const detailed = level === 'detailed'
+    const knownFollowersDids = opts?.knownFollowersDids
+    const includeActivitySubscriptions = opts?.activitySubscriptions ?? false
+
+    // Batch 1: known followers, profile counts, activity subscriptions.
+    const knownFollowersPromise = knownFollowersDids?.length
+      ? this.actor
+          .getKnownFollowers(knownFollowersDids, ctx.viewer)
+          .catch((err): KnownFollowersStates => {
+            hydrationLogger.error(
+              { err },
+              'Failed to get known followers for profiles',
+            )
+            return new HydrationMap()
+          })
+      : Promise.resolve(undefined)
+
+    const profileAggsPromise = detailed
+      ? this.actor.getProfileAggregates(dids)
+      : Promise.resolve(undefined)
+
+    const activitySubscriptionsPromise = includeActivitySubscriptions
+      ? this.actor
+          .getActivitySubscriptions(dids, ctx.viewer)
+          .catch((err): ActivitySubscriptionStates => {
+            if (!detailed && opts?.activitySubscriptions) throw err
+            hydrationLogger.error(
+              { err },
+              'Failed to get activity subscriptions state for profiles',
+            )
+            return new HydrationMap()
+          })
+      : Promise.resolve(undefined)
+
+    const profilesPromise = (async () => {
+      // Wait for known followers to collect their DIDs for batch 2.
+      const knownFollowers = await knownFollowersPromise
+      const subjectsToKnownFollowersMap = new Map<DidString, DidString[]>()
+      knownFollowers?.forEach((known, did) => {
+        if (known) subjectsToKnownFollowersMap.set(did, known.followers)
+      })
+      const allKnownFollowerDids = knownFollowers
+        ? Array.from(knownFollowers.values())
+            .filter(Boolean)
+            .flatMap((f) => f!.followers)
+        : []
+      const allDids = Array.from(new Set(dids.concat(allKnownFollowerDids)))
+
+      // Batch 2: profiles, bidirectional blocks between requested DIDs and their known followers.
+      const profileStatePromise = this.hydrateProfileState(allDids, ctx)
+      const bidirectionalBlocksPromise = knownFollowers
+        ? this.hydrateBidirectionalBlocks(subjectsToKnownFollowersMap, ctx)
+        : undefined
+
+      // Batch 3: joined-via starter packs, profile links.
+      const starterPackStatePromise = detailed
+        ? (async () => {
+            const state = await profileStatePromise
+            const starterPackUriSet = new Set<AtUriString>()
+            state.actors?.forEach((actor) => {
+              if (actor?.profile?.joinedViaStarterPack) {
+                starterPackUriSet.add(actor.profile.joinedViaStarterPack.uri)
+              }
+            })
+            return this.hydrateStarterPacksBasic([...starterPackUriSet], ctx)
+          })()
+        : undefined
+      const profileLinksPromise = detailed
+        ? (async () => {
+            const state = await profileStatePromise
+            return this.actor
+              .getProfileLinks(
+                profileLinkUris(dids, state.actors),
+                ctx.includeTakedowns,
+              )
+              .catch((err): ProfileLinks => {
+                hydrationLogger.error({ err }, 'Failed to get profile links')
+                return new HydrationMap()
+              })
+          })()
+        : undefined
+
+      const [
+        profileState,
+        bidirectionalBlocks,
+        starterPackState,
+        profileLinks,
+      ] = await Promise.all([
+        profileStatePromise,
+        bidirectionalBlocksPromise,
+        starterPackStatePromise,
+        profileLinksPromise,
+      ])
+
+      return mergeManyStates(profileState, starterPackState ?? {}, {
+        knownFollowers,
+        bidirectionalBlocks,
+        profileLinks,
+        ctx,
+      })
+    })()
+
+    // Also await counts and subscriptions from batch 1.
+    const [state, profileAggs, activitySubscriptions] = await Promise.all([
+      profilesPromise,
+      profileAggsPromise,
+      activitySubscriptionsPromise,
+    ])
+
+    return mergeStates(state, {
+      profileAggs,
+      activitySubscriptions,
+      ctx,
+    })
+  }
+
+  private async hydrateProfileState(
+    dids: DidString[],
+    ctx: HydrateCtx,
   ): Promise<HydrationState> {
     /**
      * Special case here, we want to include takedowns in special cases, like
@@ -256,6 +495,30 @@ export class Hydrator {
       this.label.getLabelsForSubjects(labelSubjectsForDid(dids), ctx.labelers),
       this.hydrateProfileViewers(dids, ctx),
     ])
+    // Hydrate verification issuer actors so the verification view can expose
+    // the issuer's current handle and displayName. Skipped when no hydrated
+    // actor has any verifications, which is the common case.
+    const issuerDids: DidString[] = []
+    const issuerDidSet = new Set<DidString>()
+    for (const actor of actors.values()) {
+      if (!actor) continue
+      for (const verification of actor.verifications) {
+        const issuer = verification.issuer
+        if (actors.has(issuer) || issuerDidSet.has(issuer)) continue
+        issuerDidSet.add(issuer)
+        issuerDids.push(issuer)
+      }
+    }
+    if (issuerDids.length > 0) {
+      const issuerActors = await this.actor.getActors(issuerDids, {
+        includeTakedowns,
+      })
+      // Merge into actors without overwriting existing entries (the original
+      // dids may have been fetched with skipCacheForDids, etc.).
+      for (const [did, actor] of issuerActors) {
+        if (!actors.has(did)) actors.set(did, actor)
+      }
+    }
     if (!includeTakedowns) {
       actionTakedownLabels(dids, actors, labels)
     }
@@ -263,87 +526,6 @@ export class Hydrator {
       actors,
       labels,
       ctx,
-    })
-  }
-
-  // app.bsky.actor.defs#profileViewBasic
-  // - profile basic
-  //   - profile
-  //     - list basic
-  async hydrateProfilesBasic(
-    dids: DidString[],
-    ctx: HydrateCtx,
-  ): Promise<HydrationState> {
-    return this.hydrateProfiles(dids, ctx)
-  }
-
-  // app.bsky.actor.defs#profileViewDetailed
-  // - profile detailed
-  //   - profile
-  //     - list basic
-  //   - starterpack
-  //     - profile
-  //       - list basic
-  //     - labels
-  async hydrateProfilesDetailed(
-    dids: DidString[],
-    ctx: HydrateCtx,
-  ): Promise<HydrationState> {
-    let knownFollowers: KnownFollowersStates = new HydrationMap()
-    try {
-      knownFollowers = await this.actor.getKnownFollowers(dids, ctx.viewer)
-    } catch (err) {
-      hydrationLogger.error(
-        { err },
-        'Failed to get known followers for profiles',
-      )
-    }
-
-    let activitySubscriptions: ActivitySubscriptionStates = new HydrationMap()
-    try {
-      activitySubscriptions = await this.actor.getActivitySubscriptions(
-        dids,
-        ctx.viewer,
-      )
-    } catch (err) {
-      hydrationLogger.error(
-        { err },
-        'Failed to get activity subscriptions state for profiles',
-      )
-    }
-
-    const subjectsToKnownFollowersMap = new Map<DidString, DidString[]>()
-
-    for (const did of knownFollowers.keys()) {
-      const known = knownFollowers.get(did)
-      if (known) subjectsToKnownFollowersMap.set(did, known.followers)
-    }
-
-    const allKnownFollowerDids = Array.from(knownFollowers.values())
-      .filter(Boolean)
-      .flatMap((f) => f!.followers)
-    const allDids = Array.from(new Set(dids.concat(allKnownFollowerDids)))
-    const [state, profileAggs, bidirectionalBlocks] = await Promise.all([
-      this.hydrateProfiles(allDids, ctx),
-      this.actor.getProfileAggregates(dids),
-      this.hydrateBidirectionalBlocks(subjectsToKnownFollowersMap, ctx),
-    ])
-    const starterPackUriSet = new Set<AtUriString>()
-    state.actors?.forEach((actor) => {
-      if (actor?.profile?.joinedViaStarterPack) {
-        starterPackUriSet.add(actor?.profile?.joinedViaStarterPack?.uri)
-      }
-    })
-    const starterPackState = await this.hydrateStarterPacksBasic(
-      [...starterPackUriSet],
-      ctx,
-    )
-    return mergeManyStates(state, starterPackState, {
-      profileAggs,
-      knownFollowers,
-      activitySubscriptions,
-      ctx,
-      bidirectionalBlocks,
     })
   }
 
@@ -468,9 +650,13 @@ export class Hydrator {
     refs: { uri: AtUriString }[],
     ctx: HydrateCtx,
     state: HydrationState = {},
-    options: Pick<GetPostsHydrationOptions, 'processDynamicTagsForView'> = {},
+    options: HydratePostsOptions = {},
   ): Promise<HydrationState> {
     const uris = refs.map((ref) => ref.uri)
+
+    const knownLikersPromise = options.knownLikers
+      ? this.hydrateKnownLikers(options.knownLikers, ctx)
+      : undefined
 
     state.posts ??= new HydrationMap()
     const addPostsToHydrationState = (posts: Posts) => {
@@ -583,37 +769,109 @@ export class Hydrator {
       }
     }
 
+    const siteStandardRefs = siteStandardRefsFromPosts(
+      postsLayer0,
+      postsLayer1,
+      postsLayer2,
+    )
+    const siteStandardLabelSubjects = dedupeStrs(
+      siteStandardRefs.map((ref) => ref.uri),
+    )
+    // Site-standard record owners need profile basics so we can populate
+    // `associatedProfiles` on the external embed view. Include them in the
+    // post-author profile fetch below; any DIDs surfaced later by the
+    // dataplane are picked up by the top-up after the parallel batch.
+    const ssRefDids = siteStandardRefs.map((ref) => uriToDid(ref.uri))
+
+    // Collect known-liker profiles and author-liker block relationships.
+    const knownLikers = await knownLikersPromise
+    const knownLikerDids: DidString[] = []
+    const authorsAndKnownLikersRelationships: RelationshipPair[] = []
+    knownLikers?.forEach((knownLiker, uri) => {
+      if (!knownLiker) return
+      knownLikerDids.push(...knownLiker.actors)
+      const authorDid = uriToDid(uri)
+      for (const likerDid of knownLiker.actors) {
+        authorsAndKnownLikersRelationships.push([authorDid, likerDid])
+      }
+    })
+
+    const knownProfileDids = dedupeStrs([
+      ...allPostUris.map(didFromUri),
+      ...ssRefDids,
+      ...knownLikerDids,
+    ])
+
     const [
       postAggs,
       postViewers,
       labels,
-      postBlocks,
+      {
+        postBlocks,
+        additionalRelationshipsBidirectionalBlocks:
+          authorsAndKnownLikersBidirectionalBlocks,
+      },
       profileState,
       listState,
       feedGenState,
       labelerState,
       starterPackState,
       postgates,
+      {
+        documents: siteStandardDocuments,
+        publications: siteStandardPublications,
+      },
     ] = await Promise.all([
       this.feed.getPostAggregates(allRefs, ctx.viewer),
       ctx.viewer
         ? this.feed.getPostViewerStates(threadRefs, ctx.viewer)
         : undefined,
-      this.label.getLabelsForSubjects(allPostUris, ctx.labelers),
-      this.hydratePostBlocks(posts, ctx),
-      this.hydrateProfiles(allPostUris.map(didFromUri), ctx),
+      this.label.getLabelsForSubjects(
+        [...allPostUris, ...siteStandardLabelSubjects],
+        ctx.labelers,
+      ),
+      this.hydratePostBlocks(posts, ctx, authorsAndKnownLikersRelationships),
+      this.hydrateProfiles(knownProfileDids, ctx),
       this.hydrateLists([...nestedListUris, ...threadgateListUris], ctx),
       this.hydrateFeedGens(nestedFeedGenUris, ctx),
       this.hydrateLabelers(nestedLabelerDids, ctx),
       this.hydrateStarterPacksBasic(nestedStarterPackUris, ctx),
       this.feed.getPostgatesForPosts([...postUrisWithPostgates.values()]),
+      this.external.getSiteStandardRecordsByRef(
+        siteStandardRefs,
+        ctx.includeTakedowns,
+      ),
     ])
     if (!ctx.includeTakedowns) {
       actionTakedownLabels(allPostUris, posts, labels)
+      actionSiteStandardTakedownLabels(
+        siteStandardDocuments,
+        siteStandardPublications,
+        labels,
+      )
     }
+
+    // Defensive top-up: in the unlikely case the dataplane returned a
+    // publication owned by a DID not present in the post-author or
+    // pinned-ref sets, fetch its profile serially and fold it in.
+    const knownProfileDidsSet = new Set(knownProfileDids)
+    const extraSsDids: DidString[] = []
+    for (const key of siteStandardPublications.keys()) {
+      const did = uriToDid(parseGenericRecordKey(key).uri)
+      if (!knownProfileDidsSet.has(did)) {
+        knownProfileDidsSet.add(did)
+        extraSsDids.push(did)
+      }
+    }
+    const mergedProfileState = extraSsDids.length
+      ? mergeStates(
+          profileState,
+          await this.hydrateProfilesBasic(extraSsDids, ctx),
+        )
+      : profileState
     // combine all hydration state
     return mergeManyStates(
-      profileState,
+      mergedProfileState,
       listState,
       feedGenState,
       labelerState,
@@ -623,9 +881,13 @@ export class Hydrator {
         postAggs,
         postViewers,
         postBlocks,
+        knownLikers,
+        bidirectionalBlocks: authorsAndKnownLikersBidirectionalBlocks,
         labels,
         threadgates,
         postgates,
+        siteStandardDocuments,
+        siteStandardPublications,
         ctx,
       },
     )
@@ -634,7 +896,11 @@ export class Hydrator {
   private async hydratePostBlocks(
     posts: Posts,
     ctx: HydrateCtx,
-  ): Promise<PostBlocks> {
+    additionalRelationships: RelationshipPair[] = [],
+  ): Promise<{
+    postBlocks: PostBlocks
+    additionalRelationshipsBidirectionalBlocks: BidirectionalBlocks
+  }> {
     const postBlocks: PostBlocks = new HydrationMap()
     const postBlocksPairs = new Map<AtUriString, PostBlockPairs>()
     const relationships: RelationshipPair[] = []
@@ -666,6 +932,7 @@ export class Hydrator {
         postBlockPairs.embed = pair
       }
     }
+    relationships.push(...additionalRelationships)
     // replace embed/parent/root pairs with block state
     const blocks = await this.hydrateBidirectionalBlocks(
       pairsToMap(relationships),
@@ -678,7 +945,20 @@ export class Hydrator {
         root: !!root && !!isBlocked(blocks, root),
       })
     }
-    return postBlocks
+
+    const additionalRelationshipsBidirectionalBlocks: BidirectionalBlocks =
+      new HydrationMap()
+    for (const [source, targets] of pairsToMap(additionalRelationships)) {
+      const didBlocks = new HydrationMap<DidString, boolean>()
+      for (const target of targets) {
+        didBlocks.set(target, blocks.get(source)?.get(target) ?? false)
+      }
+      additionalRelationshipsBidirectionalBlocks.set(source, didBlocks)
+    }
+    return {
+      postBlocks,
+      additionalRelationshipsBidirectionalBlocks,
+    }
   }
 
   // app.bsky.feed.defs#feedViewPost
@@ -699,6 +979,7 @@ export class Hydrator {
   async hydrateFeedItems(
     items: FeedItem[],
     ctx: HydrateCtx,
+    options: HydrateFeedItemsOptions = {},
   ): Promise<HydrationState> {
     // get posts, collect reply refs
     const posts = await this.feed.getPosts(
@@ -708,6 +989,9 @@ export class Hydrator {
     const rootUris: AtUriString[] = []
     const parentUris: AtUriString[] = []
     const postAndReplyRefs: ItemRef[] = []
+    // The feed renders the root post above the feed item, so known likers are
+    // hydrated for the root rather than for the feed item itself.
+    const knownLikerSubjectUris: AtUriString[] = []
     posts.forEach((post, uri) => {
       if (!post) return
       postAndReplyRefs.push({ uri, cid: post.cid })
@@ -715,6 +999,9 @@ export class Hydrator {
         rootUris.push(post.record.reply.root.uri)
         parentUris.push(post.record.reply.parent.uri)
         postAndReplyRefs.push(post.record.reply.root, post.record.reply.parent)
+        knownLikerSubjectUris.push(post.record.reply.root.uri)
+      } else {
+        knownLikerSubjectUris.push(uri)
       }
     })
     // get replies, collect reply parent authors
@@ -731,9 +1018,18 @@ export class Hydrator {
     // hydrate state for all posts, reposts, authors of reposts + reply parent authors
     const repostUris = mapDefined(items, (item) => item.repost?.uri)
     const [postState, repostProfileState, reposts] = await Promise.all([
-      this.hydratePosts(postAndReplyRefs, ctx, {
-        posts: posts.merge(replies), // avoids refetches of posts
-      }),
+      this.hydratePosts(
+        postAndReplyRefs,
+        ctx,
+        {
+          posts: replies.merge(posts), // avoids refetches while preserving feed-item metadata
+        },
+        {
+          knownLikers: options.knownLikers
+            ? { subjectUris: dedupeStrs(knownLikerSubjectUris) }
+            : undefined,
+        },
+      ),
       this.hydrateProfiles(
         [...repostUris.map(didFromUri), ...replyParentAuthors],
         ctx,
@@ -744,6 +1040,385 @@ export class Hydrator {
       reposts,
       ctx,
     })
+  }
+
+  /**
+   * Hydrate the latest versions of external records, plus labels, profiles, and
+   * their view dependencies. `hydrationPass` is the 1-based number of this
+   * generic batch within the traversal (the root batch is pass 1); nested
+   * batches continue the count. Nested passes share the caller's
+   * `hydrationMetrics` tracker; without one, this call owns the traversal and
+   * reports its totals.
+   */
+  async hydrateEmbedExternalViewFromUris(
+    uris: AtUriString[],
+    ctx: HydrateCtx,
+    seenRecordKeys: Set<string> = new Set(),
+    hydrationPass = 1,
+    hydrationMetrics?: ExternalHydrationTracker,
+  ): Promise<HydrationState> {
+    return trackExternalHydration(
+      'uris',
+      hydrationMetrics,
+      (hydrationMetrics) =>
+        this.hydrateEmbedExternalView(
+          uris.map(uriToRef),
+          ctx,
+          seenRecordKeys,
+          hydrationPass,
+          hydrationMetrics,
+        ),
+    )
+  }
+
+  /**
+   * Like `hydrateEmbedExternalViewFromUris`, but for exact record versions
+   * pinned by strong refs. Roots land only in `externalRecordsByRef`; their
+   * URI dependencies are hydrated as latest versions by the URI path.
+   */
+  async hydrateEmbedExternalViewFromRefs(
+    refs: Required<ItemRef>[],
+    ctx: HydrateCtx,
+    seenRecordKeys: Set<string> = new Set(),
+    hydrationPass = 1,
+    hydrationMetrics?: ExternalHydrationTracker,
+  ): Promise<HydrationState> {
+    return trackExternalHydration(
+      'refs',
+      hydrationMetrics,
+      (hydrationMetrics) =>
+        this.hydrateEmbedExternalView(
+          refs,
+          ctx,
+          seenRecordKeys,
+          hydrationPass,
+          hydrationMetrics,
+        ),
+    )
+  }
+
+  private async hydrateEmbedExternalView(
+    refs: ItemRef[],
+    ctx: HydrateCtx,
+    seenRecordKeys: Set<string>,
+    hydrationPass: number,
+    hydrationMetrics: ExternalHydrationTracker,
+  ): Promise<HydrationState> {
+    // Filter at the entry point so each lookup runs at most once per shared
+    // traversal, even for callers that did not prefilter their input. Null or
+    // unavailable results stay seen as completed lookups. Nothing unseen means
+    // no hydration work, and no pass is consumed.
+    const items = takeUnseenRefs(refs, seenRecordKeys)
+    if (!items.length) return { ctx }
+    // Get any bare URIs to fetch
+    const byUriValues = items
+      .filter(({ cid }) => cid === undefined)
+      .map(({ uri }) => uri)
+    // Get any exact refs to fetch
+    const byRefValues = items.filter(isExactRef)
+    // Pull out all URIs for label/profile hydration
+    const allUris = dedupeStrs(items.map(({ uri }) => uri))
+
+    // Get all the actors that are part of this hydration
+    const dids = dedupeStrs(allUris.map(uriToDid))
+
+    const fetchRecords = async () => {
+      const [externalRecords, exactRecords] = await Promise.all([
+        byUriValues.length
+          ? this.external.getRecordsByURI(byUriValues, ctx.includeTakedowns)
+          : undefined,
+        byRefValues.length
+          ? this.external.getRecordsByRef(byRefValues, ctx.includeTakedowns)
+          : undefined,
+      ])
+      // Build the by-ref map used by some endpoints. Latest versions were not
+      // requested exactly, so they are not marked as completed exact lookups,
+      // and requested exact entries take precedence over them.
+      const externalRecordsByRef: ExternalRecordsByRef = new HydrationMap()
+      for (const [uri, info] of externalRecords ?? []) {
+        if (!info) continue
+        externalRecordsByRef.set(genericRecordKey({ uri, cid: info.cid }), info)
+      }
+      if (exactRecords) externalRecordsByRef.merge(exactRecords)
+      return { externalRecords, externalRecordsByRef }
+    }
+
+    // Count this batch where its generic fetches are scheduled; a failed batch
+    // was still attempted.
+    hydrationMetrics.recordLookups += items.length
+    hydrationMetrics.batches += 1
+    hydrationMetrics.maxPass = Math.max(hydrationMetrics.maxPass, hydrationPass)
+    const [{ externalRecords, externalRecordsByRef }, labels, profiles] =
+      await Promise.all([
+        fetchRecords(),
+        this.label.getLabelsForSubjects(allUris, ctx.labelers),
+        this.hydrateProfilesBasic(dids, ctx),
+      ])
+
+    // Merge record and profile state, then hide moderated records so they
+    // trigger no dependency expansion.
+    const baseState = mergeStates(profiles, {
+      ctx,
+      labels,
+      externalRecords,
+      externalRecordsByRef,
+    })
+    actionExternalRecordTakedowns(baseState, ctx.includeTakedowns)
+
+    // Discover and hydrate any additional view dependencies
+    const depsState = await this.hydrateExternalViewDependencies(
+      baseState,
+      items,
+      ctx,
+      seenRecordKeys,
+      hydrationPass,
+      hydrationMetrics,
+    )
+
+    // A supplemental latest lookup returning the same URI and CID is the same
+    // version, so it may replace an unavailable exact entry; other CIDs have
+    // other keys and never satisfy a pin.
+    return mergeStates(baseState, depsState)
+  }
+
+  /**
+   * Discover view dependencies by URI collection and hydrate new URIs in a batch.
+   * Returns additional state. Each input is inspected in the map matching its
+   * identity: `(uri, cid)` refs in `externalRecordsByRef`, bare URIs in
+   * `externalRecords`. Every pinned version is inspected, since versions of
+   * one URI can reference different dependencies.
+   *
+   * `seenRecordKeys` prevents repeated lookups and cycles across nested passes,
+   * but not a chain of distinct URIs; `MAX_EXTERNAL_HYDRATION_PASSES` bounds
+   * that, as a guard against future association rules or unexpected expansion.
+   * `hydrationPass` is the number of the generic batch that produced `state`
+   * (1-based, default 1 for prehydrated state, which is treated as the root
+   * batch); the next nested batch is `hydrationPass + 1`. `hydrationMetrics`
+   * is shared as in `hydrateEmbedExternalViewFromUris`.
+   */
+  async hydrateExternalViewDependencies(
+    state: HydrationState,
+    refs: ItemRef[],
+    ctx: HydrateCtx,
+    seenRecordKeys: Set<string> = new Set(),
+    hydrationPass = 1,
+    hydrationMetrics?: ExternalHydrationTracker,
+  ): Promise<HydrationState> {
+    return trackExternalHydration(
+      'dependencies',
+      hydrationMetrics,
+      (hydrationMetrics) =>
+        this.discoverExternalViewDependencies(
+          state,
+          refs,
+          ctx,
+          seenRecordKeys,
+          hydrationPass,
+          hydrationMetrics,
+        ),
+    )
+  }
+
+  private async discoverExternalViewDependencies(
+    state: HydrationState,
+    refs: ItemRef[],
+    ctx: HydrateCtx,
+    seenRecordKeys: Set<string>,
+    hydrationPass: number,
+    hydrationMetrics: ExternalHydrationTracker,
+  ): Promise<HydrationState> {
+    // Backlink sources to sample per target, each with its own bound.
+    const targets = new Map<
+      AtUriString,
+      { collection: NsidString; limit: number }[]
+    >()
+    const discoveredUris = new Set<AtUriString>()
+
+    for (const ref of refs) {
+      /*
+       *  Additional safety in case this method is ever called directly.
+       *  `takeUnseenRefs` already populates this map, so this is a no-op under
+       *  normal circumstances.
+       */
+      seenRecordKeys.add(genericRecordKey(ref))
+      const { uri, cid } = ref
+      const record = (
+        cid === undefined
+          ? state.externalRecords?.get(uri)
+          : state.externalRecordsByRef?.get(genericRecordKey({ uri, cid }))
+      )?.record
+      if (!record) continue
+      const parsed = parseAtUriString(uri)
+      if (
+        !parsed.success ||
+        !isDidString(parsed.value.authority) ||
+        !parsed.value.rkey ||
+        parsed.value.hash
+      ) {
+        continue
+      }
+
+      /*
+       * Collection-specific rules for discovering additional view dependencies.
+       */
+      const { collection } = parsed.value
+      if (
+        collection === site.standard.document.$type &&
+        site.standard.document.$matches(record, { strict: false })
+      ) {
+        targets.set(uri, [
+          {
+            collection: site.standard.graph.recommend.$type,
+            limit: ExternalHydrator.MAX_BACKLINK_PREVIEWS,
+          },
+        ])
+
+        const publicationUri = recordUriOf(
+          record.site,
+          site.standard.publication.$type,
+        )
+        if (publicationUri) discoveredUris.add(publicationUri)
+      } else if (
+        collection === site.standard.publication.$type &&
+        site.standard.publication.$matches(record, { strict: false })
+      ) {
+        targets.set(uri, [
+          {
+            collection: site.standard.graph.subscription.$type,
+            limit: ExternalHydrator.MAX_BACKLINK_PREVIEWS,
+          },
+        ])
+      } else if (
+        collection === place.stream.livestream.$type &&
+        place.stream.livestream.$matches(record, { strict: false })
+      ) {
+        // Nothing to do atm
+      } else if (
+        collection === social.grain.gallery.$type &&
+        social.grain.gallery.$matches(record, { strict: false })
+      ) {
+        targets.set(uri, [
+          {
+            collection: social.grain.favorite.$type,
+            limit: ExternalHydrator.MAX_BACKLINK_PREVIEWS,
+          },
+          {
+            collection: social.grain.gallery.item.$type,
+            limit: ExternalHydrator.MAX_BACKLINK_GALLERY_ITEMS,
+          },
+        ])
+      } else if (
+        collection === social.grain.gallery.item.$type &&
+        social.grain.gallery.item.$matches(record, { strict: false })
+      ) {
+        // Items have no backlinks; they only point at their photo.
+        const photoUri = recordUriOf(record.item, social.grain.photo.$type)
+        if (photoUri) discoveredUris.add(photoUri)
+      }
+    }
+
+    let externalRecordBacklinks: ExternalRecordBacklinks | undefined
+    let externalRecordBacklinkCounts: ExternalRecordBacklinkCounts | undefined
+    if (targets.size) {
+      const backlinks: ExternalRecordBacklinks = new HydrationMap()
+      const queries = [...targets].flatMap(([uri, sources]) =>
+        sources.map((source) => ({ uri, ...source })),
+      )
+      // @NOTE Backlink data is best effort: a failed lookup leaves its state
+      // absent and builders render what remains.
+      const [counts] = await Promise.all([
+        this.external
+          .getAtmosphereBacklinkCounts([...targets.keys()])
+          .catch((err) => {
+            hydrationLogger.warn(
+              { err },
+              'failed to hydrate external record backlink counts',
+            )
+            return undefined
+          }),
+        (async () => {
+          // @NOTE Bound fan-out as well as each sample; counts are independent.
+          for (const batch of chunkArray(
+            queries,
+            ExternalHydrator.MAX_BACKLINK_FANOUT,
+          )) {
+            await Promise.all(
+              batch.map(async ({ uri, collection, limit }) => {
+                let page: Awaited<
+                  ReturnType<ExternalHydrator['getAtmosphereBacklinks']>
+                >
+                try {
+                  page = await this.external.getAtmosphereBacklinks(
+                    uri,
+                    collection,
+                    { limit },
+                  )
+                } catch (err) {
+                  hydrationLogger.warn(
+                    { err, uri, collection },
+                    'failed to hydrate external record backlinks',
+                  )
+                  return
+                }
+                const links = page.backlinks
+                  .filter((b) => parseAtUriString(b.uri).success)
+                  .slice(0, limit)
+                  .map((b) => b.uri)
+                backlinks.set(
+                  uri,
+                  dedupeStrs([...(backlinks.get(uri) ?? []), ...links]),
+                )
+                links.forEach((link) => discoveredUris.add(link))
+              }),
+            )
+          }
+        })(),
+      ])
+      externalRecordBacklinks = backlinks
+      externalRecordBacklinkCounts = counts
+    }
+
+    const newUris = [...discoveredUris].filter(
+      (uri) => !seenRecordKeys.has(genericRecordKey({ uri })),
+    )
+    let nested: HydrationState = {}
+    if (
+      newUris.length &&
+      hydrationPass >= ExternalHydrator.MAX_EXTERNAL_HYDRATION_PASSES
+    ) {
+      // Keep the partial state. Skipped URIs are not marked seen: they were
+      // never fetched.
+      hydrationMetrics.capped = true
+      hydrationLogger.warn(
+        {
+          hydrationPass,
+          maxPasses: ExternalHydrator.MAX_EXTERNAL_HYDRATION_PASSES,
+          skipped: newUris.length,
+        },
+        'external hydration pass limit reached, skipping dependencies',
+      )
+    } else if (newUris.length) {
+      try {
+        nested = await this.hydrateEmbedExternalViewFromUris(
+          newUris,
+          ctx,
+          seenRecordKeys,
+          hydrationPass + 1,
+          hydrationMetrics,
+        )
+      } catch (err) {
+        // Skip the whole batch; partial child state could miss moderation.
+        hydrationLogger.warn(
+          { err, hydrationPass, skipped: newUris.length },
+          'failed to hydrate external view dependencies',
+        )
+      }
+    }
+
+    return mergeStates(
+      { ctx, externalRecordBacklinks, externalRecordBacklinkCounts },
+      nested,
+    )
   }
 
   // app.bsky.feed.defs#threadViewPost
@@ -759,6 +1434,7 @@ export class Hydrator {
   async hydrateThreadPosts(
     refs: ItemRef[],
     ctx: HydrateCtx,
+    options: Pick<HydratePostsOptions, 'knownLikers'> = {},
   ): Promise<HydrationState> {
     const postsState = await this.hydratePosts(refs, ctx, undefined, {
       processDynamicTagsForView: ctx.features.checkGate(
@@ -766,6 +1442,7 @@ export class Hydrator {
       )
         ? 'thread'
         : undefined,
+      knownLikers: options.knownLikers,
     })
 
     const threadRefs: ThreadRef[] = []
@@ -785,6 +1462,42 @@ export class Hydrator {
     const threadContexts = await this.feed.getThreadContexts(threadRefs)
 
     return mergeStates(postsState, { threadContexts })
+  }
+
+  private async hydrateKnownLikers(
+    options: HydrateKnownLikersOptions,
+    ctx: HydrateCtx,
+  ): Promise<KnownLikersStates | undefined> {
+    const { subjectUris } = options
+    if (!ctx.viewer || subjectUris.length === 0) return undefined
+
+    // Fail open.
+    try {
+      const { results } = await this.dataplane.getKnownLikers(
+        {
+          actorDid: ctx.viewer,
+          subjectUris,
+          limit: 3,
+        },
+        { signal: AbortSignal.timeout(100) },
+      )
+      const knownLikers: KnownLikersStates = new HydrationMap()
+      for (const result of results) {
+        const subjectUri = result.subjectUri as AtUriString
+        const dids = result.dids as DidString[]
+        if (result.count > 0) {
+          knownLikers.set(subjectUri, {
+            count: result.count,
+            actors: dids,
+          })
+        }
+      }
+      return knownLikers
+    } catch (err) {
+      hydrationLogger.error({ err }, 'Failed to hydrate known likers')
+      events.hydrationFailed({ source: 'known_likers', err })
+      return undefined
+    }
   }
 
   // app.bsky.feed.defs#generatorView
@@ -880,7 +1593,11 @@ export class Hydrator {
       this.hydrateFeedGens(feedUris, ctx),
       this.hydrateLists(listUris, ctx),
       ...listUris.map((uri) =>
-        this.dataplane.getListMembers({ listUri: uri, limit: 50 }),
+        this.dataplane.getListMembers({
+          listUri: uri,
+          limit: 50,
+          viewerDid: ctx.viewer ?? undefined,
+        }),
       ),
     ])
     // collect list info
@@ -893,17 +1610,17 @@ export class Hydrator {
     const listCreatorMemberPairs = [...listMembersByList.entries()].flatMap(
       ([listUri, members]) => {
         const creator = didFromUri(listUri)
-        return members.listitems.map(
-          (li): RelationshipPair => [creator, li.did as DidString],
-        )
+        return members.listitems.map((li): RelationshipPair => [
+          creator,
+          li.did as DidString,
+        ])
       },
     )
-    const blocks = await this.hydrateBidirectionalBlocks(
-      pairsToMap(listCreatorMemberPairs),
-      ctx,
-    )
-    // sample top list items per starter pack based on their follows
-    const listMemberAggs = await this.actor.getProfileAggregates(listMemberDids)
+    const [blocks, listMemberAggs] = await Promise.all([
+      this.hydrateBidirectionalBlocks(pairsToMap(listCreatorMemberPairs), ctx),
+      // sample top list items per starter pack based on their follows
+      this.actor.getProfileAggregates(listMemberDids),
+    ])
     const listItemUris: AtUriString[] = []
     uris.forEach((uri) => {
       const sp = starterPackState.starterPacks?.get(uri)
@@ -933,11 +1650,21 @@ export class Hydrator {
     })
     // hydrate sampled list items
     const listItemState = await this.hydrateListItems(listItemUris, ctx)
+    // @NOTE Subject opt-outs come from list membership, not list item records.
+    const listItemSubjectOptOuts: ListItemSubjectOptOuts = new HydrationMap()
+    listsMembers.forEach((members) => {
+      members.listitems.forEach((item) => {
+        if (item.subjectOptedOut) {
+          listItemSubjectOptOuts.set(item.uri as AtUriString, true)
+        }
+      })
+    })
     return mergeManyStates(
       starterPackState,
       feedGenState,
       listState,
       listItemState,
+      { listItemSubjectOptOuts },
     )
   }
 
@@ -1021,7 +1748,7 @@ export class Hydrator {
     ])
     const viewerRootPostUris = new Set<AtUriString>()
     for (const notif of notifs) {
-      if (notif.reason === 'reply') {
+      if (notif.reason === NOTIFICATION_REASON.REPLY) {
         const post = posts.get(notif.uri as AtUriString)
         if (post) {
           const rootUri = post.record.reply?.root.uri
@@ -1031,11 +1758,20 @@ export class Hydrator {
         }
       }
     }
-    const threadgates = await this.feed.getThreadgatesForPosts([
-      ...viewerRootPostUris.values(),
+    const starterPackUris = new Set<AtUriString>()
+    follows.forEach((follow) => {
+      if (!follow) return
+      const starterPackUri = getStarterPackUriFromFollow(follow.record)
+      if (starterPackUri) starterPackUris.add(starterPackUri)
+    })
+    const [threadgates, starterPackState] = await Promise.all([
+      this.feed.getThreadgatesForPosts([...viewerRootPostUris.values()]),
+      starterPackUris.size
+        ? this.hydrateStarterPacksBasic([...starterPackUris], ctx)
+        : {},
     ])
     actionTakedownLabels(postUris, posts, labels)
-    return mergeStates(profileState, {
+    return mergeManyStates(profileState, starterPackState, {
       posts,
       likes,
       reposts,
@@ -1045,6 +1781,97 @@ export class Hydrator {
       threadgates,
       ctx,
     })
+  }
+
+  async hydrateGroupedNotifications(
+    notifs: RawNotification[],
+    ctx: HydrateCtx,
+    opts?: { knownFollowersDids?: DidString[] },
+  ): Promise<HydrationState> {
+    if (!notifs.length) return { ctx }
+    const notificationUris = dedupeStrs(notifs.map((notif) => notif.uri))
+    const authorDids = dedupeStrs(notificationUris.map(didFromUri))
+
+    const collections = urisByCollection(notificationUris)
+    const notificationPostUris = collections.get(app.bsky.feed.post.$type) ?? []
+    const likeUris = collections.get(app.bsky.feed.like.$type) ?? []
+    const followUris = collections.get(app.bsky.graph.follow.$type) ?? []
+    const repostUris = new Set(collections.get(app.bsky.feed.repost.$type))
+    const postUris = new Set(notificationPostUris)
+    const feedGenUris = new Set<AtUriString>()
+    const starterPackUris = new Set<AtUriString>()
+
+    for (const notif of notifs) {
+      switch (notif.reason) {
+        case NOTIFICATION_REASON.LIKE_VIA_REPOST:
+        case NOTIFICATION_REASON.REPOST_VIA_REPOST:
+          repostUris.add(notif.reasonSubject)
+          break
+        case NOTIFICATION_REASON.LIKE: {
+          const subjectUri = notif.reasonSubject
+          if (
+            new AtUri(subjectUri).collection === app.bsky.feed.generator.$type
+          ) {
+            feedGenUris.add(subjectUri)
+          } else {
+            postUris.add(subjectUri)
+          }
+          break
+        }
+        case NOTIFICATION_REASON.REPOST:
+          postUris.add(notif.reasonSubject)
+          break
+        case NOTIFICATION_REASON.STARTERPACK_JOINED:
+          starterPackUris.add(notif.reasonSubject)
+          break
+      }
+    }
+    const [posts, likes, reposts, follows, labels, profileState] =
+      await Promise.all([
+        this.feed.getPosts(notificationPostUris, ctx.includeTakedowns),
+        this.feed.getLikes(likeUris, ctx.includeTakedowns),
+        this.feed.getReposts([...repostUris], ctx.includeTakedowns),
+        this.graph.getFollows(followUris, ctx.includeTakedowns),
+        this.label.getLabelsForSubjects(
+          // Fetch labels for likes and follows here; profile and post hydration fetch their own labels.
+          [...likeUris, ...followUris],
+          ctx.labelers,
+        ),
+        // Hydrate known followers only for the subset selected by the endpoint.
+        this.hydrateProfilesBasic(authorDids, ctx, {
+          knownFollowersDids: opts?.knownFollowersDids,
+        }),
+      ])
+
+    reposts.forEach((repost) => {
+      if (repost) postUris.add(repost.record.subject.uri)
+    })
+    posts.forEach((post) => {
+      const parentUri = post?.record.reply?.parent.uri
+      if (parentUri) postUris.add(parentUri)
+    })
+    follows.forEach((follow) => {
+      const starterPackUri =
+        follow && getStarterPackUriFromFollow(follow.record)
+      if (starterPackUri) starterPackUris.add(starterPackUri)
+    })
+
+    const [postState, feedGenState, starterPackState] = await Promise.all([
+      this.hydratePosts(
+        [...postUris].map((uri) => ({ uri })),
+        ctx,
+        { posts },
+      ),
+      this.hydrateFeedGens([...feedGenUris], ctx),
+      this.hydrateStarterPacksBasic([...starterPackUris], ctx),
+    ])
+    return mergeManyStates(
+      profileState,
+      postState,
+      feedGenState,
+      starterPackState,
+      { likes, reposts, follows, labels, ctx },
+    )
   }
 
   async hydrateBookmarks(
@@ -1299,6 +2126,11 @@ export class Hydrator {
           uri,
         ) ?? undefined
       )
+    } else if (collection === app.bsky.actor.link.$type) {
+      return (
+        (await this.actor.getProfileLinks([uri], includeTakedowns)).get(uri) ??
+        undefined
+      )
     } else if (collection === app.bsky.notification.declaration.$type) {
       if (parsed.rkey !== 'self') return
       return (
@@ -1357,6 +2189,7 @@ export class Hydrator {
       viewer: vals.viewer,
       includeTakedowns: vals.includeTakedowns,
       include3pBlocks: vals.include3pBlocks,
+      skipViewerBlocks: vals.skipViewerBlocks,
       includeDebugField,
       // create default anonymous scope
       features: vals.features || this.config.featureGatesClient.scope({}),
@@ -1422,9 +2255,8 @@ const isModList = (
 const labelSubjectsForDid = (dids: DidString[]) => {
   return [
     ...dids,
-    ...dids.map((did) =>
-      AtUri.make(did, app.bsky.actor.profile.$type, 'self').toString(),
-    ),
+    ...dids.map((did) => atUri(did, app.bsky.actor.profile)),
+    ...dids.map((did) => atUri(did, app.bsky.actor.status)),
   ]
 }
 
@@ -1469,6 +2301,55 @@ const nestedRecordUris = (post: Post['record']): AtUriString[] => {
   return uris
 }
 
+/**
+ * Returns every strongRef the post embedded as `external.associatedRefs`,
+ * regardless of collection. Callers are responsible for filtering to NSIDs
+ * they care about.
+ */
+const externalAssociatedRefs = (
+  post: Post['record'],
+): { uri: AtUriString; cid: string }[] => {
+  const embed = post?.embed
+  if (!embed) return []
+  if (isExternalEmbedType(embed)) {
+    return embed.external.associatedRefs ?? []
+  }
+  if (isRecordWithMediaType(embed) && isExternalEmbedType(embed.media)) {
+    return embed.media.external.associatedRefs ?? []
+  }
+  return []
+}
+
+/**
+ * Collects standard.site refs across all post layers, deduped by `uri+cid` so
+ * the dataplane batch is minimal even if multiple posts in the layer reference
+ * the same exact version of an SS record. The same `${uri}@${cid}` keys are
+ * what `getSiteStandardRecordsByRef` uses on the resulting hydration maps,
+ * which lets `lookupAssociatedSiteStandardRecords` do an O(1) version-exact
+ * lookup at view time.
+ */
+const siteStandardRefsFromPosts = (...postLayers: Posts[]): ItemRef[] => {
+  const seen = new Set<string>()
+  const out: ItemRef[] = []
+  for (const layer of postLayers) {
+    for (const item of layer.values()) {
+      if (!item) continue
+      for (const ref of externalAssociatedRefs(item.record)) {
+        if (
+          !new AtUri(ref.uri).collection.startsWith(SITE_STANDARD_NSID_PREFIX)
+        ) {
+          continue
+        }
+        const key = `${ref.uri}@${ref.cid}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push({ uri: ref.uri, cid: ref.cid })
+      }
+    }
+  }
+  return out
+}
+
 const getListUrisFromThreadgates = (gates: Threadgates): AtUriString[] => {
   const uris: AtUriString[] = []
   for (const gate of gates.values()) {
@@ -1492,6 +2373,30 @@ const pairsToMap = <K extends string>(pairs: [a: K, b: K][]): Map<K, K[]> => {
     else map.set(a, [b])
   }
   return map
+}
+
+/**
+ * The link records a profile points to, in order. Only the first
+ * MAX_PROFILE_LINKS are shown, and only links in the profile's own repo count.
+ */
+export const profileLinkUris = (
+  dids: DidString[],
+  actors: Actors | undefined,
+): AtUriString[] => {
+  const uris: AtUriString[] = []
+  for (const did of dids) {
+    const refs = actors?.get(did)?.profile?.links ?? []
+    for (const ref of refs.slice(0, MAX_PROFILE_LINKS)) {
+      const parsed = new AtUri(ref.uri)
+      if (
+        parsed.host === did &&
+        parsed.collection === app.bsky.actor.link.$type
+      ) {
+        uris.push(ref.uri)
+      }
+    }
+  }
+  return dedupeStrs(uris)
 }
 
 export const mergeStates = (
@@ -1527,6 +2432,10 @@ export const mergeStates = (
     ),
     listViewers: mergeMaps(stateA.listViewers, stateB.listViewers),
     listItems: mergeMaps(stateA.listItems, stateB.listItems),
+    listItemSubjectOptOuts: mergeMaps(
+      stateA.listItemSubjectOptOuts,
+      stateB.listItemSubjectOptOuts,
+    ),
     likes: mergeMaps(stateA.likes, stateB.likes),
     likeBlocks: mergeMaps(stateA.likeBlocks, stateB.likeBlocks),
     labels: mergeMaps(stateA.labels, stateB.labels),
@@ -1535,10 +2444,12 @@ export const mergeStates = (
     feedgenViewers: mergeMaps(stateA.feedgenViewers, stateB.feedgenViewers),
     starterPacks: mergeMaps(stateA.starterPacks, stateB.starterPacks),
     starterPackAggs: mergeMaps(stateA.starterPackAggs, stateB.starterPackAggs),
+    profileLinks: mergeMaps(stateA.profileLinks, stateB.profileLinks),
     labelers: mergeMaps(stateA.labelers, stateB.labelers),
     labelerAggs: mergeMaps(stateA.labelerAggs, stateB.labelerAggs),
     labelerViewers: mergeMaps(stateA.labelerViewers, stateB.labelerViewers),
     knownFollowers: mergeMaps(stateA.knownFollowers, stateB.knownFollowers),
+    knownLikers: mergeMaps(stateA.knownLikers, stateB.knownLikers),
     activitySubscriptions: mergeMaps(
       stateA.activitySubscriptions,
       stateB.activitySubscriptions,
@@ -1549,6 +2460,27 @@ export const mergeStates = (
     ),
     verifications: mergeMaps(stateA.verifications, stateB.verifications),
     bookmarks: mergeNestedMaps(stateA.bookmarks, stateB.bookmarks),
+    externalRecords: mergeMaps(stateA.externalRecords, stateB.externalRecords),
+    externalRecordsByRef: mergeMaps(
+      stateA.externalRecordsByRef,
+      stateB.externalRecordsByRef,
+    ),
+    externalRecordBacklinks: mergeMaps(
+      stateA.externalRecordBacklinks,
+      stateB.externalRecordBacklinks,
+    ),
+    externalRecordBacklinkCounts: mergeMaps(
+      stateA.externalRecordBacklinkCounts,
+      stateB.externalRecordBacklinkCounts,
+    ),
+    siteStandardDocuments: mergeMaps(
+      stateA.siteStandardDocuments,
+      stateB.siteStandardDocuments,
+    ),
+    siteStandardPublications: mergeMaps(
+      stateA.siteStandardPublications,
+      stateB.siteStandardPublications,
+    ),
   }
 }
 
@@ -1568,6 +2500,95 @@ const actionTakedownLabels = (
   }
 }
 
+/**
+ * The URI when an externally authored reference is a complete DID-based
+ * record URI in `collection`, with a record key and no fragment.
+ */
+const recordUriOf = (
+  value: string,
+  collection: NsidString,
+): AtUriString | undefined => {
+  const parsed = parseAtUriString(value)
+  return parsed.success &&
+    isDidString(parsed.value.authority) &&
+    parsed.value.collection === collection &&
+    parsed.value.rkey &&
+    !parsed.value.hash
+    ? (value as AtUriString)
+    : undefined
+}
+
+/**
+ * Apply takedown labels to the site.standard hydration maps. Per-record
+ * takedowns null any entry whose subject URI is taken down; pair takedowns
+ * propagate that null across doc/publication pairs so we never render half
+ * of a moderated embed. Pairs are discovered via `doc.record.site`; orphan
+ * docs and orphan publications are subject only to the per-record sweep.
+ */
+const actionSiteStandardTakedownLabels = (
+  documents: SiteStandardDocuments,
+  publications: SiteStandardPublications,
+  labels: Labels,
+) => {
+  // Pairings have to be captured before nulling — the doc record carries
+  // the publication URI in its `site` field, and we lose it once we null.
+  const pairings: { docKey: ExactRecordKey; pubKey: ExactRecordKey }[] = []
+  if (documents.size > 0 && publications.size > 0) {
+    const pubKeysByUri = new Map<string, ExactRecordKey[]>()
+    for (const key of publications.keys()) {
+      const { uri } = parseGenericRecordKey(key)
+      const list = pubKeysByUri.get(uri)
+      if (list) list.push(key)
+      else pubKeysByUri.set(uri, [key])
+    }
+    for (const [docKey, doc] of documents) {
+      const site = doc?.record.site
+      if (!site || !site.startsWith('at://')) continue
+      for (const pubKey of pubKeysByUri.get(site) ?? []) {
+        pairings.push({ docKey, pubKey })
+      }
+    }
+  }
+
+  // Per-record takedowns: null any entry whose subject URI is taken down.
+  for (const key of documents.keys()) {
+    const { uri } = parseGenericRecordKey(key)
+    if (labels.get(uri)?.isTakendown) documents.set(key, null)
+  }
+  for (const key of publications.keys()) {
+    const { uri } = parseGenericRecordKey(key)
+    if (labels.get(uri)?.isTakendown) publications.set(key, null)
+  }
+
+  // Pair takedowns: if exactly one side of a pair was nulled above, mirror.
+  for (const { docKey, pubKey } of pairings) {
+    const doc = documents.get(docKey)
+    const pub = publications.get(pubKey)
+    if (doc === null && pub !== null) publications.set(pubKey, null)
+    if (pub === null && doc !== null) documents.set(docKey, null)
+  }
+}
+
 const uriToRef = (uri: AtUriString): ItemRef => {
   return { uri }
 }
+
+/**
+ * Drop refs whose lookup key is already in `seenRecordKeys`, and mark the rest
+ * synchronously so concurrent work in the traversal cannot schedule them again.
+ * Latest (bare URI) and exact (`uri@cid`) keys are distinct identities in the
+ * shared set: neither implies nor suppresses the other, or another version.
+ */
+const takeUnseenRefs = (
+  refs: ItemRef[],
+  seenRecordKeys: Set<string>,
+): ItemRef[] =>
+  refs.filter((ref) => {
+    const key = genericRecordKey(ref)
+    if (seenRecordKeys.has(key)) return false
+    seenRecordKeys.add(key)
+    return true
+  })
+
+const isExactRef = (ref: ItemRef): ref is Required<ItemRef> =>
+  ref.cid !== undefined

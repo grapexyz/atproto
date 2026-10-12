@@ -1,98 +1,147 @@
-import { HOUR, MINUTE, mapDefined } from '@atproto/common'
-import { $Typed, Un$Typed, Unknown$TypedObject, UriString } from '@atproto/lex'
+import { HOUR, MINUTE, dedupeStrs, mapDefined } from '@atproto/common'
+import {
+  type $Typed,
+  type Un$Typed,
+  type Unknown$TypedObject,
+  type UriString,
+  atUri,
+  getBlobCidString,
+} from '@atproto/lex'
 import {
   AtUri,
-  AtUriString,
-  DatetimeString,
-  DidString,
+  type AtUriString,
+  type DatetimeString,
+  type DidString,
   INVALID_HANDLE,
   normalizeDatetimeAlways,
 } from '@atproto/syntax'
-import { Actor, ProfileViewerState } from '../hydration/actor'
-import { FeedItem, Like, Post, Repost } from '../hydration/feed'
-import { Follow, Verification } from '../hydration/graph'
-import { HydrationState } from '../hydration/hydrator'
-import { Label } from '../hydration/label'
-import { RecordInfo, parseString } from '../hydration/util'
-import { ImageUriBuilder } from '../image/uri'
-import { app } from '../lexicons/index.js'
-import { Notification } from '../proto/bsky_pb'
+import {
+  APPVIEW_NOTIFICATION_REASON,
+  NOTIFICATION_REASON,
+} from '../api/app/bsky/notification/constants.js'
+import type {
+  NotificationGroup,
+  NotificationItem,
+} from '../api/app/bsky/notification/grouping/grouping.js'
+import type { Actor, ProfileViewerState } from '../hydration/actor.js'
+import {
+  type AssociatedSiteStandardRecord,
+  type SiteStandardDocument,
+  type SiteStandardPublication,
+  getSiteStandardRecordsFromHydrationMapsByRefs,
+} from '../hydration/external.js'
+import type { FeedItem, Like, Post, Repost } from '../hydration/feed.js'
+import type { Follow, Verification } from '../hydration/graph.js'
+import type { HydrationState } from '../hydration/hydrator.js'
+import type { Label } from '../hydration/label.js'
+import {
+  type RecordInfo,
+  getStarterPackUriFromFollow,
+  parseString,
+} from '../hydration/util.js'
+import type { ImageUriBuilder } from '../image/uri.js'
+import { app, site } from '../lexicons/index.js'
+import { viewsLogger } from '../logger.js'
+import type { Notification } from '../proto/bsky_pb.js'
+import {
+  estimateReadingTimeMinutes,
+  validateStandardSiteRecordsForUrl,
+} from '../util/external/standard-site.js'
 import {
   postUriToPostgateUri,
   postUriToThreadgateUri,
   safePinnedPost,
   uriToDid,
   uriToDid as creatorFromUri,
-} from '../util/uris'
+} from '../util/uris.js'
+import { externalRecordView as externalRecordViewBase } from './external.js'
 import {
-  ThreadItemValueBlocked,
-  ThreadItemValueNoUnauthenticated,
-  ThreadItemValueNotFound,
-  ThreadItemValuePost,
-  ThreadOtherAnchorPostNode,
-  ThreadOtherItemValuePost,
-  ThreadOtherPostNode,
-  ThreadTree,
-  ThreadTreeVisible,
+  MAX_PROFILE_LINKS,
+  isAllowedProfileLinkUrl,
+} from './profile-link-rules.js'
+import {
+  type ThreadItemValueBlocked,
+  type ThreadItemValueNoUnauthenticated,
+  type ThreadItemValueNotFound,
+  type ThreadItemValuePost,
+  type ThreadOtherAnchorPostNode,
+  type ThreadOtherItemValuePost,
+  type ThreadOtherPostNode,
+  type ThreadTree,
+  type ThreadTreeVisible,
   sortTrimFlattenThreadTree,
-} from './threads-v2'
+} from './threads-v2.js'
 import {
-  ActivitySubscription,
-  BlockedPost,
-  BookmarkView,
-  Embed,
-  EmbedView,
-  ExternalEmbed,
-  ExternalEmbedView,
-  FeedViewPost,
-  FollowRecord,
-  GeneratorView,
-  GetPostThreadV2QueryParams,
-  ImagesEmbed,
-  ImagesEmbedView,
-  KnownFollowers,
-  LabelerRecord,
-  LabelerView,
-  LabelerViewDetailed,
-  LikeRecord,
-  ListItemView,
-  ListView,
-  ListViewBasic,
-  MaybePostView,
-  NotFoundPost,
-  NotificationRecordDeleted,
-  NotificationView,
-  PostEmbedView,
-  PostRecord,
-  PostView,
-  ProfileAssociatedActivitySubscription,
-  ProfileRecord,
-  ProfileView,
-  ProfileViewBasic,
-  ProfileViewDetailed,
-  ProfileViewer,
-  ReasonPin,
-  ReasonRepost,
-  RecordEmbed,
-  RecordEmbedView,
-  RecordEmbedViewInternal,
-  RecordWithMedia,
-  RecordWithMediaView,
-  ReplyRef,
-  RepostRecord,
-  StarterPackView,
-  StarterPackViewBasic,
-  StatusView,
-  ThreadItem,
-  ThreadOtherItem,
-  ThreadViewPost,
-  ThreadgateView,
-  VerificationRecord,
-  VerificationState,
-  VerificationView,
-  VideoEmbed,
-  VideoEmbedView,
+  type ActivitySubscription,
+  type BlockedPost,
+  type BookmarkView,
+  type Embed,
+  type EmbedView,
+  type ExternalEmbed,
+  type ExternalEmbedColorRgb,
+  type ExternalEmbedSourceThemeView,
+  type ExternalEmbedSourceView,
+  type ExternalEmbedView,
+  type ExternalRecordView,
+  type FeedViewPost,
+  type FollowRecord,
+  type GalleryEmbed,
+  type GalleryEmbedView,
+  type GalleryImageEmbed,
+  type GalleryImageEmbedView,
+  type GeneratorView,
+  type GetPostThreadV2QueryParams,
+  type ImagesEmbed,
+  type ImagesEmbedView,
+  type KnownFollowers,
+  type KnownLikers,
+  type LabelerRecord,
+  type LabelerView,
+  type LabelerViewDetailed,
+  type LikeRecord,
+  type ListItemView,
+  type ListView,
+  type ListViewBasic,
+  type MaybePostView,
+  type NotFoundPost,
+  type NotificationRecordDeleted,
+  type NotificationView,
+  type PostEmbedView,
+  type PostRecord,
+  type PostView,
+  type ProfileAssociatedActivitySubscription,
+  type ProfileAssociatedChat,
+  type ProfileLinkView,
+  type ProfileRecord,
+  type ProfileView,
+  type ProfileViewBasic,
+  type ProfileViewDetailed,
+  type ProfileViewer,
+  type ReasonPin,
+  type ReasonRepost,
+  type RecordEmbed,
+  type RecordEmbedView,
+  type RecordEmbedViewInternal,
+  type RecordWithMedia,
+  type RecordWithMediaView,
+  type ReplyRef,
+  type RepostRecord,
+  type SiteStandardPublicationRecord,
+  type StarterPackView,
+  type StarterPackViewBasic,
+  type StatusView,
+  type ThreadItem,
+  type ThreadOtherItem,
+  type ThreadViewPost,
+  type ThreadgateView,
+  type VerificationRecord,
+  type VerificationState,
+  type VerificationView,
+  type VideoEmbed,
+  type VideoEmbedView,
   isExternalEmbedType,
+  isGalleryEmbedType,
+  isGalleryImageEmbedType,
   isImagesEmbedType,
   isLabelerRecordType,
   isListRuleType,
@@ -104,12 +153,7 @@ import {
   isSelfLabelsType,
   isVideoEmbedType,
 } from './types.js'
-import {
-  VideoUriBuilder,
-  cidFromBlobJson,
-  parsePostgate,
-  parseThreadGate,
-} from './util'
+import { type VideoUriBuilder, parsePostgate, parseThreadGate } from './util.js'
 
 const notificationDeletedRecord =
   app.bsky.notification.defs.recordDeleted.$build({})
@@ -117,6 +161,17 @@ const notificationDeletedRecord =
 // Pre-computed CID for the `notificationDeletedRecord`.
 const notificationDeletedRecordCid =
   'bafyreidad6nyekfa4a67yfb573ptxiv6s7kyxyg2ra6qbbemcruadvtuim'
+
+// Soft-limit for `app.bsky.embed.gallery#main.items`. The lexicon's
+// schema-level cap is 20, but clients are expected to enforce a soft limit
+// of 10 today. The AppView trims defensively at the view boundary.
+const GALLERY_SOFT_LIMIT = 10
+
+type ProfileViewOptions = {
+  // Normally known followers inclusion is decided by its presence on the hydration state.
+  // This is an override.
+  includeKnownFollowers?: boolean
+}
 
 export class Views {
   public imgUriBuilder: ImageUriBuilder = this.opts.imgUriBuilder
@@ -169,6 +224,7 @@ export class Views {
   }
 
   viewerBlockExists(did: DidString, state: HydrationState): boolean {
+    if (state.ctx?.skipViewerBlocks) return false
     const viewer = state.profileViewers?.get(did)
     if (!viewer) return false
     return !!(
@@ -183,6 +239,18 @@ export class Views {
     const viewer = state.profileViewers?.get(did)
     if (!viewer) return false
     return !!(viewer.muted || this.mutedByList(viewer, state))
+  }
+
+  viewerRepostMuteExists(did: DidString, state: HydrationState): boolean {
+    const viewer = state.profileViewers?.get(did)
+    if (!viewer) return false
+    return !!viewer.mutedOnlyReposts
+  }
+
+  viewerQuotepostMuteExists(did: DidString, state: HydrationState): boolean {
+    const viewer = state.profileViewers?.get(did)
+    if (!viewer) return false
+    return !!viewer.mutedOnlyQuoteposts
   }
 
   blockingByList(
@@ -256,28 +324,22 @@ export class Views {
   profileDetailed(
     did: DidString,
     state: HydrationState,
+    opts?: ProfileViewOptions,
   ): Un$Typed<ProfileViewDetailed> | undefined {
     const actor = state.actors?.get(did)
     if (!actor) return
-    const baseView = this.profile(did, state)
+    const baseView = this.profile(did, state, opts)
     if (!baseView) return
-    const knownFollowers = this.knownFollowers(did, state)
     const profileAggs = state.profileAggs?.get(did)
 
     return {
       ...baseView,
       website: this.profileWebsite(did, state),
-      viewer: baseView.viewer
-        ? {
-            ...baseView.viewer,
-            knownFollowers,
-          }
-        : undefined,
       banner: actor.profile?.banner
         ? this.imgUriBuilder.getPresetUri(
             'banner',
             did,
-            cidFromBlobJson(actor.profile.banner),
+            getBlobCidString(actor.profile.banner),
           )
         : undefined,
       followersCount: profileAggs?.followers ?? 0,
@@ -288,10 +350,7 @@ export class Views {
         feedgens: profileAggs?.feeds,
         starterPacks: profileAggs?.starterPacks,
         labeler: actor.isLabeler,
-        // @TODO apply default chat policy?
-        chat: actor.allowIncomingChatsFrom
-          ? { allowIncoming: actor.allowIncomingChatsFrom }
-          : undefined,
+        chat: this.profileAssociatedChat(actor),
         activitySubscription: this.profileAssociatedActivitySubscription(actor),
         germ: actor.germ?.record.messageMe
           ? {
@@ -304,15 +363,48 @@ export class Views {
         ? this.starterPackBasic(actor.profile.joinedViaStarterPack.uri, state)
         : undefined,
       pinnedPost: safePinnedPost(actor.profile?.pinnedPost),
+      links: this.profileLinks(did, state),
     }
   }
+
+  profileLinks(
+    did: DidString,
+    state: HydrationState,
+  ): ProfileLinkView[] | undefined {
+    const refs = state.actors?.get(did)?.profile?.links
+    if (!refs?.length) return
+    const links: ProfileLinkView[] = []
+    for (const ref of refs.slice(0, MAX_PROFILE_LINKS)) {
+      // the batch may include other actors' links, so check the repo here too
+      if (uriToDid(ref.uri) !== did) continue
+      // missing when taken down, deleted, or invalid
+      const link = state.profileLinks?.get(ref.uri)
+      if (!link || !isAllowedProfileLinkUrl(link.record.url)) continue
+      links.push({
+        uri: ref.uri,
+        cid: link.cid,
+        url: link.record.url,
+        title: link.record.title,
+        icon: link.record.icon
+          ? this.imgUriBuilder.getPresetUri(
+              'avatar',
+              did,
+              getBlobCidString(link.record.icon),
+            )
+          : undefined,
+      })
+    }
+    return links.length ? links : undefined
+  }
+
   profile(
     did: DidString,
     state: HydrationState,
+    opts?: ProfileViewOptions,
   ): Un$Typed<ProfileView> | undefined {
     const actor = state.actors?.get(did)
     if (!actor) return
-    const basicView = this.profileBasic(did, state)
+    const basicView = this.profileBasic(did, state, opts)
     if (!basicView) return
     return {
       ...basicView,
@@ -330,14 +422,11 @@ export class Views {
   profileBasic(
     did: DidString,
     state: HydrationState,
+    opts?: ProfileViewOptions,
   ): Un$Typed<ProfileViewBasic> | undefined {
     const actor = state.actors?.get(did)
     if (!actor) return
-    const profileUri = AtUri.make(
-      did,
-      app.bsky.actor.profile.$nsid,
-      'self',
-    ).toString()
+    const profileUri = atUri(did, app.bsky.actor.profile)
     const labels = [
       ...(state.labels?.getBySubject(did) ?? []),
       ...(state.labels?.getBySubject(profileUri) ?? []),
@@ -347,6 +436,12 @@ export class Views {
         record: actor.profile,
       }),
     ]
+    const viewer = this.profileViewer(did, state)
+    const knownFollowers =
+      viewer && (opts?.includeKnownFollowers ?? true)
+        ? this.knownFollowers(did, state)
+        : undefined
+    if (viewer && knownFollowers) viewer.knownFollowers = knownFollowers
     return {
       did,
       handle: actor.handle ?? INVALID_HANDLE,
@@ -356,17 +451,14 @@ export class Views {
         ? this.imgUriBuilder.getPresetUri(
             'avatar',
             did,
-            cidFromBlobJson(actor.profile.avatar),
+            getBlobCidString(actor.profile.avatar),
           )
         : undefined,
       // associated.feedgens and associated.lists info not necessarily included
       // on profile and profile-basic views, but should be on profile-detailed.
       associated: {
         labeler: actor.isLabeler ? true : undefined,
-        // @TODO apply default chat policy?
-        chat: actor.allowIncomingChatsFrom
-          ? { allowIncoming: actor.allowIncomingChatsFrom }
-          : undefined,
+        chat: this.profileAssociatedChat(actor),
         activitySubscription: this.profileAssociatedActivitySubscription(actor),
         germ: actor.germ?.record.messageMe
           ? {
@@ -375,7 +467,7 @@ export class Views {
             }
           : undefined,
       },
-      viewer: this.profileViewer(did, state),
+      viewer,
       labels,
       createdAt: actor.createdAt
         ? (actor.createdAt.toISOString() as DatetimeString)
@@ -386,30 +478,18 @@ export class Views {
     }
   }
 
+  profileAssociatedChat(actor: Actor): ProfileAssociatedChat | undefined {
+    if (!actor.allowIncomingChatsFrom) return undefined
+    return {
+      allowIncoming: actor.allowIncomingChatsFrom,
+      allowGroupInvites: actor.allowGroupChatInvitesFrom,
+    }
+  }
+
   profileAssociatedActivitySubscription(
     actor: Actor,
   ): ProfileAssociatedActivitySubscription {
     return { allowSubscriptions: actor.allowActivitySubscriptionsFrom }
-  }
-
-  profileKnownFollowers(
-    did: DidString,
-    state: HydrationState,
-  ): ProfileView | undefined {
-    const actor = state.actors?.get(did)
-    if (!actor) return
-    const baseView = this.profile(did, state)
-    if (!baseView) return
-    const knownFollowers = this.knownFollowers(did, state)
-    return {
-      ...baseView,
-      viewer: baseView.viewer
-        ? {
-            ...baseView.viewer,
-            knownFollowers,
-          }
-        : undefined,
-    }
   }
 
   profileViewer(
@@ -424,8 +504,16 @@ export class Views {
     const blockingUri = viewer.blocking || blockingByList
     const block = !!blockedByUri || !!blockingUri
     const mutedByList = this.mutedByList(viewer, state)
+    // scoped mute flags are exclusive with muted: when the account is fully
+    // muted (directly or via a mutelist), suppress them so a scoped direct
+    // mute underneath a list mute doesn't surface both as true.
+    const muted = !!(viewer.muted || mutedByList)
     return {
-      muted: !!(viewer.muted || mutedByList),
+      muted,
+      // when muted is true, these are suppressed to avoid confusion
+      mutedOnlyReposts: !muted && !!viewer.mutedOnlyReposts,
+      // when muted is true, these are suppressed to avoid confusion
+      mutedOnlyQuoteposts: !muted && !!viewer.mutedOnlyQuoteposts,
       mutedByList: mutedByList ? this.listBasic(mutedByList, state) : undefined,
       blockedBy: !!blockedByUri,
       blocking: blockingUri,
@@ -481,21 +569,57 @@ export class Views {
   ): KnownFollowers | undefined {
     const knownFollowers = state.knownFollowers?.get(did)
     if (!knownFollowers) return
+    return this.knownSubjects(
+      did,
+      knownFollowers.count,
+      knownFollowers.followers,
+      'followers',
+      state,
+    )
+  }
+
+  knownLikers(
+    uri: AtUriString,
+    state: HydrationState,
+  ): KnownLikers | undefined {
+    const knownLikers = state.knownLikers?.get(uri)
+    if (!knownLikers) return
+    return this.knownSubjects(
+      new AtUri(uri).did,
+      knownLikers.count,
+      knownLikers.actors,
+      'actors',
+      state,
+    )
+  }
+
+  private knownSubjects<Key extends 'followers' | 'actors'>(
+    did: DidString,
+    count: number,
+    subjectDids: DidString[],
+    key: Key,
+    state: HydrationState,
+  ): { count: number } & Record<Key, ProfileViewBasic[]> {
     const blocks = state.bidirectionalBlocks?.get(did)
-    const followers = mapDefined(knownFollowers.followers, (followerDid) => {
-      if (this.viewerBlockExists(followerDid, state)) {
+    const subjects = mapDefined(subjectDids, (subjectDid) => {
+      if (this.viewerBlockExists(subjectDid, state)) {
         return undefined
       }
-      if (blocks?.get(followerDid)) {
+      if (blocks?.get(subjectDid)) {
         return undefined
       }
-      if (this.actorIsNoHosted(followerDid, state)) {
-        // @TODO only needed right now to work around getProfile's { includeTakedowns: true }
+      if (this.actorIsNoHosted(subjectDid, state)) {
         return undefined
       }
-      return this.profileBasic(followerDid, state)
+      // @NOTE Nested known-subject views must not recursively expand social proof.
+      return this.profileBasic(subjectDid, state, {
+        includeKnownFollowers: false,
+      })
     })
-    return { count: knownFollowers.count, followers }
+    return { count, [key]: subjects } as { count: number } & Record<
+      Key,
+      ProfileViewBasic[]
+    >
   }
 
   verification(
@@ -515,14 +639,22 @@ export class Views {
       ({ issuer, uri, displayName, handle, createdAt }): VerificationView => {
         // @NOTE: We don't factor-in impersonation when evaluating the validity of each verification,
         // only in the overall profile verification validity.
+        // The verification record's `displayName`/`handle` are the *subject's* snapshot at
+        // verification time; we compare them to the subject's current values to determine validity.
         const isValid =
           !!displayName &&
           displayName === actor.profile?.displayName &&
           !!handle &&
           handle === actor.handle
 
+        // Expose the *issuer's* current handle/displayName, sourced from the
+        // issuer's hydrated actor record (see `Hydrator.hydrateProfiles`).
+        const issuerActor = state.actors?.get(issuer)
+
         return {
           issuer,
+          issuerDisplayName: issuerActor?.profile?.displayName,
+          issuerHandle: issuerActor?.handle,
           uri,
           isValid,
           createdAt,
@@ -575,7 +707,8 @@ export class Views {
       return undefined
     }
 
-    const uri = AtUri.make(did, app.bsky.actor.status.$nsid, 'self').toString()
+    const uri = atUri(did, app.bsky.actor.status)
+    const labels = state.labels?.getBySubject(uri)
 
     const minDuration = 5 * MINUTE
     const maxDuration = 4 * HOUR
@@ -600,8 +733,9 @@ export class Views {
       status: record.status,
       embed:
         record.embed && isExternalEmbedType(record.embed)
-          ? this.externalEmbed(did, record.embed)
+          ? this.externalEmbed(did, record.embed, state)
           : undefined,
+      labels,
       expiresAt,
       isActive,
     }
@@ -672,7 +806,7 @@ export class Views {
         ? this.imgUriBuilder.getPresetUri(
             'avatar',
             creator,
-            cidFromBlobJson(list.record.avatar),
+            getBlobCidString(list.record.avatar),
           )
         : undefined,
       listItemCount: listAgg?.listItems ?? 0,
@@ -682,6 +816,10 @@ export class Views {
         ? {
             muted: !!listViewer.viewerMuted,
             blocked: listViewer.viewerListBlockUri,
+            referenceListOptOut:
+              list.record.purpose === app.bsky.graph.defs.Referencelist
+                ? listViewer.referenceListOptOutUri
+                : undefined,
           }
         : undefined,
     }
@@ -691,10 +829,11 @@ export class Views {
     uri: AtUriString,
     did: DidString,
     state: HydrationState,
+    subjectOptedOut?: boolean,
   ): Un$Typed<ListItemView> | undefined {
     const subject = this.profile(did, state)
     if (!subject) return
-    return { uri, subject }
+    return { uri, subject, subjectOptedOut: subjectOptedOut || undefined }
   }
 
   starterPackBasic(
@@ -732,12 +871,18 @@ export class Views {
       this.feedGenerator(feed.uri, state),
     )
     const list = this.listBasic(sp.record.list, state)
+    const showSubjectOptOuts =
+      state.ctx?.viewer === creatorFromUri(sp.record.list) &&
+      list?.purpose === app.bsky.graph.defs.Referencelist
     const listItemsSample = mapDefined(agg?.listItemSampleUris ?? [], (uri) => {
       const li = state.listItems?.get(uri)
       if (!li) return
-      const subject = this.profile(li.record.subject, state)
-      if (!subject) return
-      return { uri, subject }
+      return this.listItemView(
+        uri,
+        li.record.subject,
+        state,
+        showSubjectOptOuts && !!state.listItemSubjectOptOuts?.get(uri),
+      )
     })
     return {
       ...basicView,
@@ -808,11 +953,7 @@ export class Views {
     const viewer = state.labelerViewers?.get(did)
     const aggs = state.labelerAggs?.get(did)
 
-    const uri = AtUri.make(
-      did,
-      app.bsky.labeler.service.$type,
-      'self',
-    ).toString()
+    const uri = atUri(did, app.bsky.labeler.service)
     const labels = [
       ...(state.labels?.getBySubject(uri) ?? []),
       ...this.selfLabels({
@@ -863,8 +1004,10 @@ export class Views {
     state: HydrationState,
   ): {
     originatorMuted: boolean
+    originatorRepostMuted: boolean
     originatorBlocked: boolean
     authorMuted: boolean
+    authorQuotepostMuted: boolean
     authorBlocked: boolean
     ancestorAuthorBlocked: boolean
   } {
@@ -881,8 +1024,13 @@ export class Views {
       grandparentUri && creatorFromUri(grandparentUri)
     return {
       originatorMuted: this.viewerMuteExists(originatorDid, state),
+      originatorRepostMuted:
+        !!item.repost && this.viewerRepostMuteExists(originatorDid, state),
       originatorBlocked: this.viewerBlockExists(originatorDid, state),
       authorMuted: this.viewerMuteExists(authorDid, state),
+      authorQuotepostMuted:
+        postIsQuotepost(post?.record) &&
+        this.viewerQuotepostMuteExists(authorDid, state),
       authorBlocked: this.viewerBlockExists(authorDid, state),
       ancestorAuthorBlocked:
         (!!parentAuthorDid && this.viewerBlockExists(parentAuthorDid, state)) ||
@@ -916,7 +1064,7 @@ export class Views {
         ? this.imgUriBuilder.getPresetUri(
             'avatar',
             creatorDid,
-            cidFromBlobJson(feedgen.record.avatar),
+            getBlobCidString(feedgen.record.avatar),
           )
         : undefined,
       likeCount: aggs?.likes ?? 0,
@@ -953,6 +1101,7 @@ export class Views {
     uri: AtUriString,
     state: HydrationState,
     depth = 0,
+    options: { includeKnownLikers?: boolean } = {},
   ): Un$Typed<PostView> | undefined {
     const post = state.posts?.get(uri)
     if (!post) return
@@ -962,6 +1111,9 @@ export class Views {
     if (!author) return
     const aggs = state.postAggs?.get(uri)
     const viewer = state.postViewers?.get(uri)
+    const knownLikers = options.includeKnownLikers
+      ? this.knownLikers(uri, state)
+      : undefined
     const threadgateUri = postUriToThreadgateUri(uri)
     const labels = [
       ...(state.labels?.getBySubject(uri) ?? []),
@@ -995,6 +1147,7 @@ export class Views {
             replyDisabled: this.userReplyDisabled(uri, state),
             embeddingDisabled: this.userPostEmbeddingDisabled(uri, state),
             pinned: this.viewerPinned(uri, state, authorDid),
+            knownLikers,
           }
         : undefined,
       labels,
@@ -1022,7 +1175,13 @@ export class Views {
       reason = this.reasonRepost(item.repost.uri, repost, state)
       if (!reason) return
     }
-    const post = this.post(item.post.uri, state)
+    // The feed renders the root post above the feed item, so known likers are
+    // presented on the root rather than on the feed item itself. A post that
+    // does not reply to anything is its own root.
+    const isRoot = !state.posts?.get(item.post.uri)?.record.reply
+    const post = this.post(item.post.uri, state, 0, {
+      includeKnownLikers: isRoot,
+    })
     if (!post) return
     const reply = !postInfo?.violatesThreadGate
       ? this.replyRef(item.post.uri, state)
@@ -1031,6 +1190,8 @@ export class Views {
       post,
       reason,
       reply,
+      opThreadPostIndex: postInfo?.opThreadPostIndex,
+      opThreadPostCount: postInfo?.opThreadPostCount,
     }
   }
 
@@ -1040,8 +1201,15 @@ export class Views {
   ): Un$Typed<ReplyRef> | undefined {
     const postRecord = state.posts?.get(uri)?.record
     if (!postRecord?.reply) return
-    let root = this.maybePost(postRecord.reply.root.uri, state)
-    let parent = this.maybePost(postRecord.reply.parent.uri, state)
+    const rootUri = postRecord.reply.root.uri
+    const parentUri = postRecord.reply.parent.uri
+    // Known likers are only hydrated for the root post. The parent is the root
+    // itself in a direct reply, and clients render that object rather than the
+    // separate root, so it has to be marked too.
+    let root = this.maybePost(rootUri, state, { includeKnownLikers: true })
+    let parent = this.maybePost(parentUri, state, {
+      includeKnownLikers: parentUri === rootUri,
+    })
     if (!state.ctx?.include3pBlocks) {
       const childBlocks = state.postBlocks?.get(uri)
       const parentBlocks = state.postBlocks?.get(parent.uri)
@@ -1079,8 +1247,12 @@ export class Views {
     }
   }
 
-  maybePost(uri: AtUriString, state: HydrationState): $Typed<MaybePostView> {
-    const post = this.post(uri, state)
+  maybePost(
+    uri: AtUriString,
+    state: HydrationState,
+    options: { includeKnownLikers?: boolean } = {},
+  ): $Typed<MaybePostView> {
+    const post = this.post(uri, state, 0, options)
     if (!post) {
       return this.notFoundPost(uri)
     }
@@ -1295,7 +1467,13 @@ export class Views {
   // ------------
 
   threadV2(
-    skeleton: { anchor: AtUriString; uris: AtUriString[] },
+    skeleton: {
+      anchor: AtUriString
+      uris: AtUriString[]
+      // The complete OP thread (root first, in chain order), untrimmed by
+      // above/below limits. See GetThreadResponse.op_thread.
+      opThread?: AtUriString[]
+    },
     state: HydrationState,
     {
       above,
@@ -1312,7 +1490,9 @@ export class Views {
     const { anchor: anchorUri, uris } = skeleton
 
     // Not found.
-    const postView = this.post(anchorUri, state)
+    const postView = this.post(anchorUri, state, 0, {
+      includeKnownLikers: true,
+    })
     const post = state.posts?.get(anchorUri)
     if (!post || !postView) {
       return {
@@ -1426,6 +1606,7 @@ export class Views {
       anchorTree,
       {
         opDid,
+        opThreadUris: skeleton.opThread && new Set(skeleton.opThread),
         branchingFactor,
         sort,
         viewer: state.ctx?.viewer ?? null,
@@ -1437,6 +1618,27 @@ export class Views {
         state.ctx.features.Gate.ThreadsReplyRankingExplorationEnable,
       ),
     )
+
+    if (skeleton.opThread) {
+      const indexByUri = new Map(
+        skeleton.opThread.map((uri, i) => [uri, i + 1]),
+      )
+      const postCount = skeleton.opThread.length
+      for (const item of thread) {
+        if (!app.bsky.unspecced.defs.threadItemPost.$isTypeOf(item.value)) {
+          continue
+        }
+        const index = indexByUri.get(item.uri as AtUriString)
+        item.value.opThread = index !== undefined
+        if (index !== undefined) {
+          item.value.opThreadPostIndex = index
+          item.value.opThreadPostCount = postCount
+        } else {
+          delete item.value.opThreadPostIndex
+          delete item.value.opThreadPostCount
+        }
+      }
+    }
 
     return {
       hasOtherReplies,
@@ -2060,8 +2262,10 @@ export class Views {
       return this.imagesEmbed(creatorFromUri(postUri), embed)
     } else if (isVideoEmbedType(embed)) {
       return this.videoEmbed(creatorFromUri(postUri), embed)
+    } else if (isGalleryEmbedType(embed)) {
+      return this.galleryEmbed(creatorFromUri(postUri), embed)
     } else if (isExternalEmbedType(embed)) {
-      return this.externalEmbed(creatorFromUri(postUri), embed)
+      return this.externalEmbed(creatorFromUri(postUri), embed, state)
     } else if (isRecordEmbedType(embed)) {
       return this.recordEmbed(postUri, embed, state, depth)
     } else if (isRecordWithMediaType(embed)) {
@@ -2076,12 +2280,12 @@ export class Views {
       thumb: this.imgUriBuilder.getPresetUri(
         'feed_thumbnail',
         did,
-        cidFromBlobJson(img.image),
+        getBlobCidString(img.image),
       ),
       fullsize: this.imgUriBuilder.getPresetUri(
         'feed_fullsize',
         did,
-        cidFromBlobJson(img.image),
+        getBlobCidString(img.image),
       ),
       alt: img.alt,
       aspectRatio: img.aspectRatio,
@@ -2092,7 +2296,7 @@ export class Views {
   }
 
   videoEmbed(did: DidString, embed: VideoEmbed): $Typed<VideoEmbedView> {
-    const cid = cidFromBlobJson(embed.video)
+    const cid = getBlobCidString(embed.video)
     return app.bsky.embed.video.view.$build({
       cid,
       playlist: this.videoUriBuilder.playlist({ did, cid }),
@@ -2103,24 +2307,296 @@ export class Views {
     })
   }
 
+  galleryEmbed(did: DidString, embed: GalleryEmbed): $Typed<GalleryEmbedView> {
+    // The lexicon's schema-level cap is 20, but clients are expected to
+    // enforce a soft limit of 10. Trim defensively at the view boundary so
+    // viewers see at most 10 items regardless of what was authored.
+    const items = embed.items.slice(0, GALLERY_SOFT_LIMIT).flatMap((item) => {
+      const view = this.galleryItemView(did, item)
+      return view ? [view] : []
+    })
+    return app.bsky.embed.gallery.view.$build({ items })
+  }
+
+  private galleryItemView(
+    did: DidString,
+    item: GalleryEmbed['items'][number],
+  ): $Typed<GalleryImageEmbedView> | undefined {
+    if (isGalleryImageEmbedType(item)) {
+      return this.galleryImageView(did, item)
+    }
+    return undefined
+  }
+
+  private galleryImageView(
+    did: DidString,
+    item: GalleryImageEmbed,
+  ): $Typed<GalleryImageEmbedView> {
+    return app.bsky.embed.gallery.viewImage.$build({
+      thumbnail: this.imgUriBuilder.getPresetUri(
+        'feed_thumbnail',
+        did,
+        getBlobCidString(item.image),
+      ),
+      fullsize: this.imgUriBuilder.getPresetUri(
+        'feed_fullsize',
+        did,
+        getBlobCidString(item.image),
+      ),
+      alt: item.alt,
+      aspectRatio: item.aspectRatio,
+    })
+  }
+
+  /** Build a supported record modality from generic record and backlink hydration. */
+  externalRecordView(
+    uri: AtUriString,
+    state: HydrationState,
+    now = Date.now(),
+  ): $Typed<ExternalRecordView> | undefined {
+    return externalRecordViewBase(this, uri, state, now)
+  }
+
   externalEmbed(
     did: DidString,
     embed: ExternalEmbed,
+    state: HydrationState,
   ): $Typed<ExternalEmbedView> {
-    const { uri, title, description, thumb } = embed.external
+    // Start from the post-author-supplied embed values, then spread the
+    // SS-derived view on top so any field the hydrated doc/publication
+    // supplies wins (title, description, thumb, source, etc). When no SS
+    // records were hydrated `ssView` is `undefined` and the spread is a
+    // no-op, leaving the base values in place. `associatedRefs` is set
+    // last because the post is authoritative about what was pinned.
+    const ssView = this.externalEmbedFromStandardSite({
+      associatedRefs: embed.external.associatedRefs,
+      state,
+      assumedUrl: embed.external.uri,
+    })
+    // The author-supplied (scraped) thumbnail always wins when present —
+    // it's the per-article OG image. Only when the embed has no thumb do
+    // we fall back to whatever the SS overlay provides (the document's
+    // `coverImage`). `thumb` is set after the `...ssView` spread so the
+    // overlay's `coverImage`-derived thumb can't clobber the embed's.
+    const embeddedThumb = embed.external.thumb
+      ? this.imgUriBuilder.getPresetUri(
+          'feed_thumbnail',
+          did,
+          getBlobCidString(embed.external.thumb),
+        )
+      : undefined
     return app.bsky.embed.external.view.$build({
       external: {
-        uri,
-        title,
-        description,
-        thumb: thumb
-          ? this.imgUriBuilder.getPresetUri(
-              'feed_thumbnail',
-              did,
-              cidFromBlobJson(thumb),
-            )
-          : undefined,
+        uri: embed.external.uri,
+        title: embed.external.title,
+        description: embed.external.description,
+        ...ssView,
+        thumb: embeddedThumb ?? ssView?.thumb,
+        associatedRefs: embed.external.associatedRefs,
       },
+    })
+  }
+
+  /**
+   * Read-path entry point: caller has the post's `external.associatedRefs[]`
+   * and the global hydration state, and we resolve the matching SS records
+   * by ref. Used by `externalEmbed`.
+   *
+   * Returns a fully-populated `viewExternal['external']` shape (including
+   * the required `uri`/`title`/`description`), or `undefined` if the
+   * records didn't hydrate, didn't pass URL validation, or couldn't
+   * supply the required fields. Callers spread the result over a base
+   * view to layer SS-derived fields on top of post-author-supplied ones.
+   *
+   * `assumedUrl` is the canonical web URL the embed claims to represent
+   * (the post's `external.uri` on the read path, the request's `url` on
+   * compose). Validation logic uses it to confirm the SS records actually
+   * back that URL, and the same value is echoed back as `uri` on the
+   * returned overlay.
+   */
+  externalEmbedFromStandardSite({
+    associatedRefs,
+    state,
+    assumedUrl,
+  }: {
+    associatedRefs: ExternalEmbed['external']['associatedRefs']
+    state: HydrationState
+    assumedUrl: string
+  }): ExternalEmbedView['external'] | undefined {
+    const { document, publication } =
+      getSiteStandardRecordsFromHydrationMapsByRefs(
+        associatedRefs,
+        state.siteStandardDocuments,
+        state.siteStandardPublications,
+      )
+    return this.externalEmbedFromStandardSiteRecords({
+      document,
+      publication,
+      state,
+      assumedUrl,
+    })
+  }
+
+  /**
+   * Compose-path entry point: caller already knows which document and
+   * publication backed the request and has them in hand (e.g. from
+   * `getStandardSiteRecordsForUri`). Skips the by-ref lookup
+   * that `externalEmbedFromStandardSite` does. Used by
+   * `getEmbedExternalView`.
+   *
+   * Returns a fully-populated `viewExternal['external']` shape (including
+   * the required `uri`/`title`/`description`), or `undefined` if any of
+   * the validation gates rejected the pair or the records couldn't
+   * supply the required fields.
+   *
+   * `state` is still needed for label hydration. `assumedUrl` is the
+   * canonical web URL the embed claims to represent (the post's
+   * `external.uri` on the read path, the request's `url` on compose);
+   * validation logic uses it to confirm the SS records actually back that
+   * URL, and the same value is echoed back as `uri` on the returned
+   * overlay.
+   */
+  externalEmbedFromStandardSiteRecords({
+    document,
+    publication,
+    state,
+    assumedUrl,
+  }: {
+    document: AssociatedSiteStandardRecord<SiteStandardDocument> | undefined
+    publication:
+      AssociatedSiteStandardRecord<SiteStandardPublication> | undefined
+    state: HydrationState
+    assumedUrl: string
+  }): ExternalEmbedView['external'] | undefined {
+    // Three layers of validation gate this overlay:
+    //
+    //  1. Hydrator nulls taken-down records and mirrors the null across
+    //     doc/pub pairs (see `actionSiteStandardTakedownLabels` in
+    //     `hydration/hydrator.ts`).
+    //  2. The lookups guarantee structural agreement between doc and pub
+    //     — matching `site`/`uri`, no orphan doc claiming a missing
+    //     publication (see `getSiteStandardRecordsFromHydrationMapsByRefs`
+    //     in `hydration/external.ts`).
+    //  3. `validateStandardSiteRecordsForUrl` below re-checks the doc/pub
+    //     relationship and that the records back the URL the embed claims
+    //     (see `util/external/standard-site.ts`).
+    //
+    // If any layer rejected, callers see `undefined` and fall back to the
+    // bare embed rather than render partial / disagreeing enrichment.
+    if (!document && !publication) return undefined
+    if (!validateStandardSiteRecordsForUrl(document, publication, assumedUrl)) {
+      viewsLogger.warn(
+        {
+          documentUri: document?.ref.uri,
+          publicationUri: publication?.ref.uri,
+        },
+        'site.standard URL validation failed',
+      )
+      return undefined
+    }
+
+    // viewExternal requires `title` and `description`. If neither side of
+    // the pair supplies usable values for both, there's no enrichment to
+    // render — return undefined and let the caller fall back.
+    let title: string
+    let description: string
+    if (document?.info.record) {
+      // Treat the document as authoritative for both fields as a unit, so
+      // we never blend a doc's title with a publication's description.
+      title = document.info.record.title
+      description = document.info.record.description ?? ''
+    } else if (publication) {
+      title = publication.info.record.name
+      description = publication.info.record.description ?? ''
+    } else {
+      return undefined
+    }
+
+    // if we don't have a title at this point, something is wrong with the SS
+    // record (it's a required field) and therefore the enrichment isn't worth
+    // showing
+    if (!title) return undefined
+
+    const overlay: ExternalEmbedView['external'] = {
+      // @ts-ignore this is mis-typed
+      uri: assumedUrl,
+      title,
+      description,
+    }
+
+    const docCover = document?.info.record.coverImage
+    if (docCover) {
+      overlay.thumb = this.imgUriBuilder.getPresetUri(
+        'feed_thumbnail',
+        creatorFromUri(document.ref.uri),
+        getBlobCidString(docCover),
+      )
+    }
+
+    if (document?.info.record.publishedAt) {
+      overlay.createdAt = document.info.record.publishedAt
+    }
+    if (document?.info.record.updatedAt) {
+      overlay.updatedAt = document.info.record.updatedAt
+    }
+    const readingTime = document?.info.record.textContent
+      ? estimateReadingTimeMinutes(document.info.record.textContent)
+      : undefined
+    if (readingTime !== undefined) overlay.readingTime = readingTime
+
+    // Merge labels applied to either the document or the publication onto the
+    // same `viewExternal.labels` array — clients moderate the embed as single
+    // unit, so doc-scoped and publication-scoped labels end up in the same
+    // bucket.
+    const labels = [
+      ...(document ? (state.labels?.getBySubject(document.ref.uri) ?? []) : []),
+      ...(publication
+        ? (state.labels?.getBySubject(publication.ref.uri) ?? [])
+        : []),
+    ]
+    if (labels.length) overlay.labels = labels
+
+    if (publication) {
+      overlay.source = this.externalEmbedSource(publication)
+    }
+
+    // Profiles of the owners of the records backing this embed. Hydrator
+    // covers these DIDs alongside post-author profiles, so misses here
+    // only happen when an actor is unavailable (suspended, deleted, etc.)
+    // — drop those rather than emit `undefined` slots.
+    const uniqueDids = dedupeStrs(
+      mapDefined([document?.ref.uri, publication?.ref.uri], (uri) =>
+        uri ? uriToDid(uri) : undefined,
+      ) as DidString[],
+    )
+    const associatedProfiles = mapDefined(uniqueDids, (did) =>
+      this.profileBasic(did, state),
+    ) as ProfileViewBasic[]
+    if (associatedProfiles.length)
+      overlay.associatedProfiles = associatedProfiles
+
+    return overlay
+  }
+
+  externalEmbedSource(
+    publication: AssociatedSiteStandardRecord<SiteStandardPublication>,
+  ): $Typed<ExternalEmbedSourceView> {
+    const { record } = publication.info
+    const pubDid = creatorFromUri(publication.ref.uri)
+    return app.bsky.embed.external.viewExternalSource.$build({
+      uri: record.url,
+      icon: record.icon
+        ? this.imgUriBuilder.getPresetUri(
+            'avatar',
+            pubDid,
+            getBlobCidString(record.icon),
+          )
+        : undefined,
+      title: record.name,
+      description: record.description,
+      theme: record.basicTheme
+        ? externalEmbedSourceTheme(record.basicTheme)
+        : undefined,
     })
   }
 
@@ -2166,6 +2642,7 @@ export class Views {
   ): $Typed<PostEmbedView> | undefined {
     const postView = this.post(uri, state, depth)
     if (!postView) return
+    const postInfo = state.posts?.get(uri)
     return app.bsky.embed.record.viewRecord.$build({
       uri: postView.uri,
       cid: postView.cid,
@@ -2176,6 +2653,8 @@ export class Views {
       replyCount: postView.replyCount,
       repostCount: postView.repostCount,
       quoteCount: postView.quoteCount,
+      opThreadPostIndex: postInfo?.opThreadPostIndex,
+      opThreadPostCount: postInfo?.opThreadPostCount,
       indexedAt: postView.indexedAt,
       embeds: depth > 1 ? undefined : postView.embed ? [postView.embed] : [],
     })
@@ -2276,13 +2755,16 @@ export class Views {
     let mediaEmbed:
       | $Typed<ImagesEmbedView>
       | $Typed<VideoEmbedView>
+      | $Typed<GalleryEmbedView>
       | $Typed<ExternalEmbedView>
     if (isImagesEmbedType(embed.media)) {
       mediaEmbed = this.imagesEmbed(creator, embed.media)
     } else if (isVideoEmbedType(embed.media)) {
       mediaEmbed = this.videoEmbed(creator, embed.media)
+    } else if (isGalleryEmbedType(embed.media)) {
+      mediaEmbed = this.galleryEmbed(creator, embed.media)
     } else if (isExternalEmbedType(embed.media)) {
-      mediaEmbed = this.externalEmbed(creator, embed.media)
+      mediaEmbed = this.externalEmbed(creator, embed.media, state)
     } else {
       return
     }
@@ -2388,6 +2870,7 @@ export class Views {
       | Pick<RecordInfo<Required<NotificationRecordDeleted>>, 'cid' | 'record'>
       | undefined
       | null
+    let starterPackUri: AtUriString | undefined
 
     if (uri.collection === app.bsky.feed.post.$type) {
       recordInfo = state.posts?.get(notif.uri as AtUriString)
@@ -2397,6 +2880,9 @@ export class Views {
       recordInfo = state.reposts?.get(notif.uri as AtUriString)
     } else if (uri.collection === app.bsky.graph.follow.$type) {
       recordInfo = state.follows?.get(notif.uri as AtUriString)
+      if (recordInfo) {
+        starterPackUri = getStarterPackUriFromFollow(recordInfo.record)
+      }
     } else if (uri.collection === app.bsky.graph.verification.$type) {
       // When a verification record is removed, the record won't be found,
       // both for the `verified` and `unverified` notifications.
@@ -2433,6 +2919,9 @@ export class Views {
       reason: notif.reason,
       reasonSubject: parseString<AtUriString>(notif.reasonSubject),
       record: recordInfo.record,
+      starterPack: starterPackUri
+        ? this.starterPackBasic(starterPackUri, state)
+        : undefined,
       // @NOTE works with a hack in listNotifications so that when there's no last-seen time,
       // the user's first notification is marked unread, and all previous read. in this case,
       // the last seen time will be equal to the first notification's indexed time.
@@ -2440,6 +2929,175 @@ export class Views {
       indexedAt: notif.timestamp.toDate().toISOString() as DatetimeString,
       labels: [...labels, ...selfLabels],
     }
+  }
+
+  notificationGroup(
+    group: NotificationGroup,
+    state: HydrationState,
+  ): app.bsky.notification.getGroupedNotifications.Group | undefined {
+    const newestItem = group.items[0]
+    if (!newestItem) return
+    const notif = newestItem.raw
+
+    const defs = app.bsky.notification.getGroupedNotifications
+    const followItem = (item: NotificationItem) => {
+      const notif = item.raw
+      const followRecord = state.follows?.get(notif.uri)?.record
+      const starterPackUri =
+        followRecord && getStarterPackUriFromFollow(followRecord)
+      return {
+        actor: item.actorDid,
+        starterPack:
+          starterPackUri &&
+          state.starterPacks?.get(starterPackUri) &&
+          state.actors?.get(creatorFromUri(starterPackUri))
+            ? starterPackUri
+            : undefined,
+      }
+    }
+    const actorItems = group.items.map((item) => ({ actor: item.actorDid }))
+    const uri = notif.uri
+    let kind: app.bsky.notification.getGroupedNotifications.Group['kind']
+
+    switch (notif.reason) {
+      case NOTIFICATION_REASON.LIKE: {
+        const subjectUri = notif.reasonSubject
+        if (
+          group.kind === APPVIEW_NOTIFICATION_REASON.MULTI_POST_LIKE &&
+          group.items.length > 1
+        ) {
+          kind = defs.multiPostLikeGroup.$build({
+            actor: newestItem.actorDid,
+            items: group.items.map((item) => ({
+              post: item.raw.reasonSubject!,
+            })),
+          })
+        } else if (
+          new AtUri(subjectUri).collection === app.bsky.feed.generator.$type
+        ) {
+          kind = defs.generatorLikeGroup.$build({
+            generator: subjectUri,
+            items: actorItems,
+          })
+        } else {
+          kind = defs.likeGroup.$build({ post: subjectUri, items: actorItems })
+        }
+        break
+      }
+      case NOTIFICATION_REASON.REPOST:
+        kind =
+          group.kind === APPVIEW_NOTIFICATION_REASON.MULTI_POST_REPOST &&
+          group.items.length > 1
+            ? defs.multiPostRepostGroup.$build({
+                actor: newestItem.actorDid,
+                items: group.items.map((item) => ({
+                  post: item.raw.reasonSubject!,
+                })),
+              })
+            : defs.repostGroup.$build({
+                post: notif.reasonSubject,
+                items: actorItems,
+              })
+        break
+      case NOTIFICATION_REASON.LIKE_VIA_REPOST:
+      case NOTIFICATION_REASON.REPOST_VIA_REPOST: {
+        if (
+          (group.kind ===
+            APPVIEW_NOTIFICATION_REASON.MULTI_POST_LIKE_VIA_REPOST ||
+            group.kind ===
+              APPVIEW_NOTIFICATION_REASON.MULTI_POST_REPOST_VIA_REPOST) &&
+          group.items.length > 1
+        ) {
+          const items = mapDefined(group.items, (item) => {
+            const viaRepost = item.raw.reasonSubject!
+            const post = state.reposts?.get(viaRepost)?.record.subject.uri
+            if (!post) return
+            return { post, viaRepost }
+          })
+          if (items.length !== group.items.length) return
+          const fields = { actor: newestItem.actorDid, items }
+          kind =
+            notif.reason === NOTIFICATION_REASON.LIKE_VIA_REPOST
+              ? defs.multiPostLikeViaRepostGroup.$build(fields)
+              : defs.multiPostRepostViaRepostGroup.$build(fields)
+          break
+        }
+        const subjectUri = notif.reasonSubject
+        const originalPostUri =
+          state.reposts?.get(subjectUri)?.record.subject.uri
+        if (!originalPostUri) return
+        const fields = {
+          post: originalPostUri,
+          viaRepost: subjectUri,
+          items: actorItems,
+        }
+        kind =
+          notif.reason === NOTIFICATION_REASON.LIKE_VIA_REPOST
+            ? defs.likeViaRepostGroup.$build(fields)
+            : defs.repostViaRepostGroup.$build(fields)
+        break
+      }
+      case NOTIFICATION_REASON.FOLLOW:
+        kind = defs.followGroup.$build({ items: group.items.map(followItem) })
+        break
+      case NOTIFICATION_REASON.FOLLOW_BACK:
+        kind = defs.followBackNotification.$build(followItem(newestItem))
+        break
+      case NOTIFICATION_REASON.SUBSCRIBED_POST:
+        kind = defs.subscribedPostGroup.$build({
+          items: group.items.map((item) => ({
+            actor: item.actorDid,
+            post: item.raw.uri,
+          })),
+        })
+        break
+      case NOTIFICATION_REASON.REPLY:
+      case NOTIFICATION_REASON.QUOTE:
+      case NOTIFICATION_REASON.MENTION: {
+        const parentUri = state.posts?.get(uri)?.record.reply?.parent.uri
+        const fields = { post: uri, parent: parentUri }
+        if (notif.reason === NOTIFICATION_REASON.REPLY) {
+          if (!parentUri) return
+          kind = defs.replyNotification.$build({ ...fields, parent: parentUri })
+        } else {
+          kind =
+            notif.reason === NOTIFICATION_REASON.QUOTE
+              ? defs.quoteNotification.$build(fields)
+              : defs.mentionNotification.$build(fields)
+        }
+        break
+      }
+      case NOTIFICATION_REASON.VERIFIED:
+        kind = defs.verifiedNotification.$build({
+          actor: newestItem.actorDid,
+        })
+        break
+      case NOTIFICATION_REASON.UNVERIFIED:
+        kind = defs.unverifiedNotification.$build({
+          actor: newestItem.actorDid,
+        })
+        break
+      case NOTIFICATION_REASON.STARTERPACK_JOINED:
+        kind = defs.starterPackJoinedNotification.$build({
+          actor: newestItem.actorDid,
+          starterPack: notif.reasonSubject,
+        })
+        break
+      case NOTIFICATION_REASON.CONTACT_MATCH:
+        kind = defs.contactMatchNotification.$build({
+          actor: newestItem.actorDid,
+        })
+        break
+      default:
+        return
+    }
+    return defs.group.$build({
+      id: group.id,
+      isRead: group.isRead,
+      indexedAt: group.indexedAt,
+      count: group.itemCount,
+      kind,
+    })
   }
 
   indexedAt({ sortedAt, indexedAt }: { sortedAt: Date; indexedAt: Date }) {
@@ -2450,4 +3108,46 @@ export class Views {
 
 const getRootUri = (uri: AtUriString, post: Post): AtUriString => {
   return post.record.reply?.root.uri ?? uri
+}
+
+const postIsQuotepost = (record: PostRecord | undefined): boolean => {
+  const embed = record?.embed
+  if (!embed) return false
+  const recordEmbed = isRecordEmbedType(embed)
+    ? embed
+    : isRecordWithMediaType(embed)
+      ? embed.record
+      : undefined
+  if (!recordEmbed) return false
+  return (
+    new AtUri(recordEmbed.record.uri).collection === app.bsky.feed.post.$type
+  )
+}
+
+const externalEmbedSourceTheme = (
+  theme: SiteStandardPublicationRecord['basicTheme'],
+): ExternalEmbedSourceThemeView | undefined => {
+  if (!theme) return undefined
+  const view: ExternalEmbedSourceThemeView = {}
+  const background = colorRGB(theme.background)
+  const foreground = colorRGB(theme.foreground)
+  const accent = colorRGB(theme.accent)
+  const accentForeground = colorRGB(theme.accentForeground)
+  if (background) view.backgroundRGB = background
+  if (foreground) view.foregroundRGB = foreground
+  if (accent) view.accentRGB = accent
+  if (accentForeground) view.accentForegroundRGB = accentForeground
+  // No fields set -> don't decorate the view at all.
+  return Object.keys(view).length === 0 ? undefined : view
+}
+
+const colorRGB = (
+  color: { $type?: unknown } | undefined,
+): ExternalEmbedColorRgb | undefined => {
+  if (!color || !site.standard.theme.color.rgb.isTypeOf(color)) return undefined
+  // `isTypeOf` narrows $type but not the shape; pull rgb fields off the
+  // unchecked input. Records that fail full validation are dropped above
+  // by the SS record parser, so by the time we get here the shape matches.
+  const { r, g, b } = color as unknown as { r: number; g: number; b: number }
+  return app.bsky.embed.external.colorRGB.$build({ r, g, b })
 }

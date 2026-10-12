@@ -1,9 +1,8 @@
-import { xrpc } from '@atproto/lex'
-import { Server } from '@atproto/xrpc-server'
-import { AuthScope } from '../../../../auth-scope'
-import { AppContext } from '../../../../context'
+import type { Server } from '@atproto/xrpc-server'
+import { AuthScope } from '../../../../auth-scope.js'
+import type { AppContext } from '../../../../context.js'
 import { com } from '../../../../lexicons/index.js'
-import { computeProxyTo, parseProxyInfo } from '../../../../pipethrough'
+import { computeProxyTo, parseProxyInfo } from '../../../../pipethrough.js'
 
 export default function (server: Server, ctx: AppContext) {
   server.add(com.atproto.moderation.createReport, {
@@ -28,10 +27,7 @@ export default function (server: Server, ctx: AppContext) {
         com.atproto.moderation.createReport.$lxm,
       )
 
-      return xrpc(url, com.atproto.moderation.createReport, {
-        validateRequest: ctx.cfg.service.devMode,
-        validateResponse: ctx.cfg.service.devMode,
-        strictResponseProcessing: ctx.cfg.service.devMode,
+      return ctx.safeClient(url).xrpc(com.atproto.moderation.createReport, {
         headers,
         params,
         body,

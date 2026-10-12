@@ -1,33 +1,38 @@
 import { mapDefined } from '@atproto/common'
 import {
-  AtIdentifierString,
-  AtUriString,
-  DatetimeString,
-  DidString,
-  HandleString,
+  type AtIdentifierString,
+  type AtUriString,
+  type DatetimeString,
+  type DidString,
+  type HandleString,
   isDidIdentifier,
   isHandleIdentifier,
   normalizeHandle,
 } from '@atproto/syntax'
-import { DataPlaneClient } from '../data-plane/client'
+import type { DataPlaneClient } from '../data-plane/client/index.js'
 import { app, chat, com } from '../lexicons/index.js'
-import { ActivitySubscription, VerificationMeta } from '../proto/bsky_pb'
-import {
+import type {
+  ActivitySubscription,
+  VerificationMeta,
+} from '../proto/bsky_pb.js'
+import { events } from '../telemetry/events.js'
+import type {
   ChatDeclarationRecord,
   GermDeclarationRecord,
   NotificationDeclarationRecord,
+  ProfileLinkRecord,
   ProfileRecord,
   StatusRecord,
 } from '../views/types.js'
 import {
   HydrationMap,
-  RecordInfo,
+  type RecordInfo,
   isActivitySubscriptionEnabled,
   parseDate,
   parseRecord,
   parseString,
   safeTakedownRef,
-} from './util'
+} from './util.js'
 
 type AllowActivitySubscriptions = Extract<
   app.bsky.notification.declaration.Main['allowSubscriptions'],
@@ -45,14 +50,16 @@ export type Actor = {
   takedownRef?: string
   isLabeler: boolean
   allowIncomingChatsFrom?: string
+  allowGroupChatInvitesFrom?: string
   upstreamStatus?: string
   createdAt?: Date
-  priorityNotifications: boolean
   trustedVerifier?: boolean
   verifications: VerificationHydrationState[]
   status?: RecordInfo<StatusRecord>
   germ?: RecordInfo<GermDeclarationRecord>
   allowActivitySubscriptionsFrom: AllowActivitySubscriptions
+  accountModerationTags: Set<string>
+  profileModerationTags: Set<string>
   /**
    * Debug information for internal development
    */
@@ -81,6 +88,9 @@ export type ChatDeclarations = HydrationMap<AtUriString, ChatDeclaration>
 export type GermDeclaration = RecordInfo<GermDeclarationRecord>
 export type GermDeclarations = HydrationMap<AtUriString, GermDeclaration>
 
+export type ProfileLink = RecordInfo<ProfileLinkRecord>
+export type ProfileLinks = HydrationMap<AtUriString, ProfileLink>
+
 export type NotificationDeclaration = RecordInfo<NotificationDeclarationRecord>
 export type NotificationDeclarations = HydrationMap<
   AtUriString,
@@ -93,6 +103,8 @@ export type Statuses = HydrationMap<AtUriString, Status>
 export type ProfileViewerState = {
   did: DidString
   muted?: boolean
+  mutedOnlyReposts?: boolean
+  mutedOnlyQuoteposts?: boolean
   mutedByList?: AtUriString
   blockedBy?: AtUriString
   blocking?: AtUriString
@@ -125,6 +137,16 @@ type KnownFollowersState = {
 export type KnownFollowersStates = HydrationMap<
   DidString,
   KnownFollowersState | undefined
+>
+
+type KnownLikersState = {
+  count: number
+  actors: DidString[]
+}
+
+export type KnownLikersStates = HydrationMap<
+  AtUriString,
+  KnownLikersState | undefined
 >
 
 export type ProfileAgg = {
@@ -245,8 +267,7 @@ export class ActorHydrator {
       const verifications = mapDefined(
         Object.entries(actor.verifiedBy) as [DidString, VerificationMeta][],
         ([actorDid, verificationMeta]):
-          | VerificationHydrationState
-          | undefined => {
+          VerificationHydrationState | undefined => {
           if (
             verificationMeta.handle &&
             verificationMeta.rkey &&
@@ -298,9 +319,9 @@ export class ActorHydrator {
         takedownRef: safeTakedownRef(actor),
         isLabeler: actor.labeler ?? false,
         allowIncomingChatsFrom: actor.allowIncomingChatsFrom || undefined,
+        allowGroupChatInvitesFrom: actor.allowGroupChatInvitesFrom || undefined,
         upstreamStatus: actor.upstreamStatus || undefined,
         createdAt: parseDate(actor.createdAt),
-        priorityNotifications: actor.priorityNotifications,
         trustedVerifier: actor.trustedVerifier,
         verifications,
         status: status,
@@ -308,6 +329,8 @@ export class ActorHydrator {
         allowActivitySubscriptionsFrom: allowActivitySubscriptionsFrom(
           actor.allowActivitySubscriptionsFrom,
         ),
+        accountModerationTags: new Set(actor.tags),
+        profileModerationTags: new Set(actor.profileTags),
         debug,
       })
     }
@@ -347,6 +370,26 @@ export class ActorHydrator {
     for (let i = 0; i < uris.length; i++) {
       const record = parseRecord(
         com.germnetwork.declaration.main,
+        res.records[i],
+        includeTakedowns,
+      )
+      map.set(uris[i], record ?? null)
+    }
+
+    return map
+  }
+
+  async getProfileLinks(
+    uris: AtUriString[],
+    includeTakedowns = false,
+  ): Promise<ProfileLinks> {
+    const map: ProfileLinks = new HydrationMap()
+    if (!uris.length) return map
+
+    const res = await this.dataplane.getProfileLinkRecords({ uris })
+    for (let i = 0; i < uris.length; i++) {
+      const record = parseRecord(
+        app.bsky.actor.link.main,
         res.records[i],
         includeTakedowns,
       )
@@ -457,6 +500,8 @@ export class ActorHydrator {
       map.set(actor, {
         did,
         muted: rels.muted ?? false,
+        mutedOnlyReposts: rels.mutedOnlyReposts ?? false,
+        mutedOnlyQuoteposts: rels.mutedOnlyQuoteposts ?? false,
         mutedByList: parseString(rels.mutedByList),
         blockedBy: parseString(rels.blockedBy),
         blocking: parseString<AtUriString>(rels.blocking),
@@ -479,34 +524,30 @@ export class ActorHydrator {
     if (!dids.length) return map
 
     try {
-      const { results: knownFollowersResults } =
-        await this.dataplane.getFollowsFollowing(
-          {
-            actorDid: viewer,
-            targetDids: dids,
-          },
-          {
-            signal: AbortSignal.timeout(100),
-          },
-        )
-
+      const { results } = await this.dataplane.sampleFollowsFollowing(
+        {
+          actorDid: viewer,
+          targetDids: dids,
+          limit: 5,
+        },
+        { signal: AbortSignal.timeout(100) },
+      )
       for (let i = 0; i < dids.length; i++) {
-        const did = dids[i]
-
-        const result = knownFollowersResults[i]?.dids
-
+        const result = results[i]
+        const followerDids = result?.dids
         map.set(
-          did,
-          result && result.length > 0
+          dids[i],
+          followerDids && followerDids.length > 0
             ? {
-                count: result.length,
-                followers: result.slice(0, 5) as DidString[],
+                count: result.totalKnown || followerDids.length,
+                followers: followerDids as DidString[],
               }
             : undefined,
         )
       }
-    } catch {
-      // ignore errors and return empty map
+    } catch (err) {
+      // Fail open.
+      events.hydrationFailed({ source: 'known_followers', err })
     }
 
     return map
@@ -532,8 +573,7 @@ export class ActorHydrator {
         // against potentially missing subscription objects in the response, so
         // we keep that defense in place.
         const subscription = subscriptions[i] as
-          | ActivitySubscription
-          | undefined
+          ActivitySubscription | undefined
 
         const state = {
           post: subscription?.post != null,
@@ -547,8 +587,9 @@ export class ActorHydrator {
           map.set(did, undefined)
         }
       }
-    } catch {
-      // ignore errors and return empty map
+    } catch (err) {
+      // Fail open.
+      events.hydrationFailed({ source: 'activity_subscriptions', err })
     }
 
     return map

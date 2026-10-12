@@ -1,21 +1,21 @@
 import { dedupeStrs, mapDefined, noUndefinedVals } from '@atproto/common'
-import { Client, DidString } from '@atproto/lex'
-import { MethodNotImplementedError, Server } from '@atproto/xrpc-server'
-import { AppContext } from '../../../../context'
+import type { Client, DidString } from '@atproto/lex'
+import { MethodNotImplementedError, type Server } from '@atproto/xrpc-server'
+import type { AppContext } from '../../../../context.js'
 import {
-  HydrateCtx,
-  Hydrator,
+  type HydrateCtx,
+  type Hydrator,
   mergeManyStates,
-} from '../../../../hydration/hydrator'
+} from '../../../../hydration/hydrator.js'
 import { app } from '../../../../lexicons/index.js'
 import {
-  HydrationFnInput,
-  PresentationFnInput,
-  RulesFnInput,
-  SkeletonFnInput,
+  type HydrationFnInput,
+  type PresentationFnInput,
+  type RulesFnInput,
+  type SkeletonFnInput,
   createPipeline,
-} from '../../../../pipeline'
-import { Views } from '../../../../views'
+} from '../../../../pipeline.js'
+import type { Views } from '../../../../views/index.js'
 
 export default function (server: Server, ctx: AppContext) {
   const getSuggestedUsersForSeeMore = createPipeline(
@@ -26,7 +26,7 @@ export default function (server: Server, ctx: AppContext) {
   )
   server.add(app.bsky.unspecced.getSuggestedUsersForSeeMore, {
     auth: ctx.authVerifier.standardOptional,
-    handler: async ({ auth, params, req }) => {
+    handler: async ({ auth, params, req, signal }) => {
       const viewer = auth.credentials.iss
       const labelers = ctx.reqLabelers(req)
       const hydrateCtx = await ctx.hydrator.createContext({
@@ -47,6 +47,7 @@ export default function (server: Server, ctx: AppContext) {
           ...params,
           hydrateCtx,
           headers,
+          signal,
         },
         ctx,
       )
@@ -75,6 +76,7 @@ const skeletonFromGetSuggestedUsersSkeleton = async (
     },
     {
       headers: params.headers,
+      signal: params.signal,
     },
   )
 }
@@ -98,11 +100,41 @@ const skeletonFromGetSuggestedUsersForSeeMoreSkeleton = async (
     },
     {
       headers: params.headers,
+      signal: params.signal,
+    },
+  )
+}
+
+const skeletonFromIris = async (
+  input: SkeletonFnInput<Context, Params>,
+): Promise<SkeletonState> => {
+  const { params, ctx } = input
+
+  if (!ctx.irisClient) {
+    throw new MethodNotImplementedError('Iris agent not available')
+  }
+
+  return ctx.irisClient.call(
+    app.bsky.unspecced.getSuggestedUsersForSeeMoreSkeleton,
+    {
+      limit: params.limit,
+      category: params.category,
+      viewer: params.hydrateCtx.viewer ?? undefined,
+    },
+    {
+      headers: params.headers,
+      signal: params.signal,
     },
   )
 }
 
 const skeleton = async (input: SkeletonFnInput<Context, Params>) => {
+  const useIris = input.params.hydrateCtx.features.checkGate(
+    input.params.hydrateCtx.features.Gate.SuggestedUsersIrisEnable,
+  )
+  if (useIris) {
+    return skeletonFromIris(input)
+  }
   const useSeeMore = input.params.hydrateCtx.features.checkGate(
     input.params.hydrateCtx.features.Gate.SuggestedUsersForSeeMoreEnable,
   )
@@ -164,11 +196,13 @@ type Context = {
   hydrator: Hydrator
   views: Views
   suggestionsClient: Client | undefined
+  irisClient: Client | undefined
 }
 
 type Params = app.bsky.unspecced.getSuggestedUsersForSeeMore.$Params & {
   hydrateCtx: HydrateCtx & { viewer: string | null }
   headers: Record<string, string>
+  signal: AbortSignal
   category?: string
 }
 

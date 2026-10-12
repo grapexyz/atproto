@@ -1,17 +1,19 @@
 import {
-  OAuthProtectedResourceMetadata,
+  type OAuthProtectedResourceMetadata,
   oauthProtectedResourceMetadataSchema,
 } from '@atproto/oauth-types'
 import {
-  Fetch,
+  type Fetch,
   FetchResponseError,
   bindFetch,
   cancelBody,
 } from '@atproto-labs/fetch'
 import {
   CachedGetter,
-  GetCachedOptions,
-  SimpleStore,
+  type GetCachedOptions,
+  type SimpleStore,
+  type StoreErrorHandler,
+  swallowStoreErrors,
 } from '@atproto-labs/simple-store'
 import { contentMime } from './util.js'
 
@@ -19,11 +21,18 @@ export type { GetCachedOptions, OAuthProtectedResourceMetadata }
 
 export type ProtectedResourceMetadataCache = SimpleStore<
   string,
-  OAuthProtectedResourceMetadata
+  OAuthProtectedResourceMetadata | null
 >
 
 export type OAuthProtectedResourceMetadataResolverConfig = {
   allowHttpResource?: boolean
+
+  /**
+   * Called when the metadata cache throws. The cache is best-effort: failures
+   * are logged (by default) and degrade to a cache miss + refetch, rather than
+   * being propagated.
+   */
+  onCacheError?: StoreErrorHandler<string>
 }
 
 /**
@@ -31,7 +40,7 @@ export type OAuthProtectedResourceMetadataResolverConfig = {
  */
 export class OAuthProtectedResourceMetadataResolver extends CachedGetter<
   string,
-  OAuthProtectedResourceMetadata
+  OAuthProtectedResourceMetadata | null
 > {
   private readonly fetch: Fetch<unknown>
   private readonly allowHttpResource: boolean
@@ -41,7 +50,10 @@ export class OAuthProtectedResourceMetadataResolver extends CachedGetter<
     fetch: Fetch = globalThis.fetch,
     config?: OAuthProtectedResourceMetadataResolverConfig,
   ) {
-    super(async (origin, options) => this.fetchMetadata(origin, options), cache)
+    super(
+      async (origin, options) => this.fetchMetadata(origin, options),
+      swallowStoreErrors(cache, config?.onCacheError),
+    )
 
     this.fetch = bindFetch(fetch)
     this.allowHttpResource = config?.allowHttpResource === true
@@ -50,7 +62,7 @@ export class OAuthProtectedResourceMetadataResolver extends CachedGetter<
   async get(
     resource: string | URL,
     options?: GetCachedOptions,
-  ): Promise<OAuthProtectedResourceMetadata> {
+  ): Promise<OAuthProtectedResourceMetadata | null> {
     const { protocol, origin } = new URL(resource)
 
     if (protocol !== 'https:' && protocol !== 'http:') {
@@ -71,7 +83,7 @@ export class OAuthProtectedResourceMetadataResolver extends CachedGetter<
   private async fetchMetadata(
     origin: string,
     options?: GetCachedOptions,
-  ): Promise<OAuthProtectedResourceMetadata> {
+  ): Promise<OAuthProtectedResourceMetadata | null> {
     const url = new URL(`/.well-known/oauth-protected-resource`, origin)
     const request = new Request(url, {
       signal: options?.signal,
@@ -81,6 +93,11 @@ export class OAuthProtectedResourceMetadataResolver extends CachedGetter<
     })
 
     const response = await this.fetch(request)
+
+    if (response.status === 404) {
+      await cancelBody(response, 'log')
+      return null
+    }
 
     // https://www.rfc-editor.org/rfc/rfc9728.html#section-3.2
     if (response.status !== 200) {

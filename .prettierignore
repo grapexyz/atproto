@@ -6,6 +6,7 @@ pnpm-lock.yaml
 .pnpm*
 .changeset
 CHANGELOG.md
+/.claude/settings.local.json
 
 # buf
 packages/bsky/src/proto
@@ -13,7 +14,6 @@ packages/bsync/src/proto
 
 # codegen
 packages/api/src/client
-packages/ozone/src/lexicon
 
 # @atproto/lex
 packages/lexicon-resolver/src/lexicons
@@ -27,5 +27,5 @@ packages/sync/src/lexicons
 # others
 packages/api/src/moderation/const/labels.ts
 packages/oauth/*/src/locales/*/messages.ts
-packages/oauth/oauth-provider-frontend/src/routeTree.gen.ts
 packages/oauth/oauth-client-expo/android/build
+packages/oauth/oauth-provider-ui/src/routeTree.gen.ts

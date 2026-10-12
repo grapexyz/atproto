@@ -1,20 +1,45 @@
 import {
-  AppBskyActorDefs,
-  AppBskyNotificationDeclaration,
-  AppBskyNotificationDefs,
-  AppBskyNotificationListActivitySubscriptions,
-  AppBskyNotificationListNotifications,
-  AppBskyNotificationPutPreferencesV2,
-  AtpAgent,
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
+import {
+  type AppBskyActorDefs,
+  type AppBskyNotificationDeclaration,
+  type AppBskyNotificationDefs,
+  type AppBskyNotificationListActivitySubscriptions,
+  type AppBskyNotificationListNotifications,
+  type AppBskyNotificationPutPreferencesV2,
+  type AtpAgent,
   ids,
 } from '@atproto/api'
-import { SeedClient, TestNetwork, basicSeed } from '@atproto/dev-env'
-import { TAG_HIDE } from '@atproto/dev-env/dist/seed/thread-v2'
-import { delayCursor } from '../../src/api/app/bsky/notification/listNotifications'
-import { Namespaces } from '../../src/stash'
-import { forSnapshot, paginateAll } from '../_util'
+import {
+  type SeedClient,
+  TestNetwork,
+  basicSeed,
+  seedThreadV2,
+} from '@atproto/dev-env'
+import type { DidString } from '@atproto/syntax'
+import { NOTIFICATION_REASON } from '../../src/api/app/bsky/notification/constants.js'
+import { delayCursor } from '../../src/api/app/bsky/notification/util.js'
+import { NotificationFeed } from '../../src/proto/bsky_pb.js'
+import { Namespaces } from '../../src/stash.js'
+import { forSnapshot, paginateAll } from '../_util.js'
 
 type Database = TestNetwork['bsky']['db']
+
+const clearNotificationSeen = async (db: Database, did: DidString) => {
+  const epoch = new Date(0).toISOString()
+  await db.db
+    .updateTable('actor_state')
+    .set({ lastSeenNotifs: epoch })
+    .where('did', '=', did)
+    .execute()
+}
 
 describe('notification views', () => {
   let network: TestNetwork
@@ -25,21 +50,21 @@ describe('notification views', () => {
   let sc: SeedClient
 
   // account dids, for convenience
-  let alice: string
-  let bob: string
-  let carol: string
-  let dan: string
-  let eve: string
-  let fred: string
-  let greg: string
-  let han: string
-  let blocked: string
+  let alice: DidString
+  let bob: DidString
+  let carol: DidString
+  let dan: DidString
+  let eve: DidString
+  let fred: DidString
+  let greg: DidString
+  let han: DidString
+  let blocked: DidString
 
   beforeAll(async () => {
     network = await TestNetwork.create({
       dbPostgresSchema: 'bsky_views_notifications',
       bsky: {
-        threadTagsHide: new Set([TAG_HIDE]),
+        threadTagsHide: new Set([seedThreadV2.TAG_HIDE]),
       },
     })
     db = network.bsky.db
@@ -78,8 +103,6 @@ describe('notification views', () => {
       password: 'blocked-pass',
     })
 
-    await network.processAll()
-
     alice = sc.dids.alice
     bob = sc.dids.bob
     carol = sc.dids.carol
@@ -91,9 +114,8 @@ describe('notification views', () => {
     blocked = sc.dids.blocked
   })
 
-  afterAll(async () => {
-    await network.close()
-  })
+  beforeEach(async () => network.processAll())
+  afterAll(async () => network?.close())
 
   const sortNotifs = (
     notifs: AppBskyNotificationListNotifications.Notification[],
@@ -206,6 +228,46 @@ describe('notification views', () => {
     await network.processAll()
   })
 
+  it('preserves follow-back reasons only in V2 notifications', async () => {
+    const followbackActor = await sc.createAccount('followback-actor', {
+      handle: 'fback1.test',
+      email: 'followback-actor@test.com',
+      password: 'hunter2hunter2',
+    })
+    const followbackRecipient = await sc.createAccount('followback-recipient', {
+      handle: 'fback2.test',
+      email: 'followback-recipient@test.com',
+      password: 'hunter2hunter2',
+    })
+
+    await sc.follow(followbackActor.did, followbackRecipient.did)
+    await network.processAll()
+    const followBackRef = await sc.follow(
+      followbackRecipient.did,
+      followbackActor.did,
+    )
+    await network.processAll()
+
+    const legacy = await network.bsky.ctx.dataplane.getNotifications({
+      actorDid: followbackActor.did,
+      limit: 10,
+    })
+    expect(
+      legacy.notifications.find((notif) => notif.uri === followBackRef.uriStr)
+        ?.reason,
+    ).toBe(NOTIFICATION_REASON.FOLLOW)
+
+    const v2 = await network.bsky.ctx.dataplane.getNotificationsV2({
+      actorDid: followbackActor.did,
+      feed: NotificationFeed.FOLLOWERS,
+      limit: 10,
+    })
+    expect(
+      v2.notifications.find((notif) => notif.uri === followBackRef.uriStr)
+        ?.reason,
+    ).toBe(NOTIFICATION_REASON.FOLLOW_BACK)
+  })
+
   it('generates notifications for quotes', async () => {
     // Dan was quoted by alice
     const notifsDan = await agent.api.app.bsky.notification.listNotifications(
@@ -234,7 +296,9 @@ describe('notification views', () => {
     )
 
     const na = sortNotifs(
-      notifsAlice.data.notifications.filter((n) => n.reason === 'like'),
+      notifsAlice.data.notifications.filter(
+        (n) => n.reason === NOTIFICATION_REASON.LIKE,
+      ),
     )
     expect(na).toHaveLength(5)
     expect(forSnapshot(na)).toMatchSnapshot()
@@ -252,7 +316,9 @@ describe('notification views', () => {
     )
 
     const na = sortNotifs(
-      notifsAlice.data.notifications.filter((n) => n.reason === 'repost'),
+      notifsAlice.data.notifications.filter(
+        (n) => n.reason === NOTIFICATION_REASON.REPOST,
+      ),
     )
     expect(na).toHaveLength(2)
     expect(forSnapshot(na)).toMatchSnapshot()
@@ -278,7 +344,9 @@ describe('notification views', () => {
     )
 
     const no = sortNotifs(
-      notifsOp.data.notifications.filter((n) => n.reason === 'like'),
+      notifsOp.data.notifications.filter(
+        (n) => n.reason === NOTIFICATION_REASON.LIKE,
+      ),
     )
     // Like from `alice` in this test.
     expect(no).toHaveLength(1)
@@ -296,7 +364,7 @@ describe('notification views', () => {
 
     const nr = sortNotifs(
       notifsReposter.data.notifications.filter(
-        (n) => n.reason === 'like-via-repost',
+        (n) => n.reason === NOTIFICATION_REASON.LIKE_VIA_REPOST,
       ),
     )
     // Like from `alice` in this test.
@@ -323,7 +391,9 @@ describe('notification views', () => {
     )
 
     const no = sortNotifs(
-      notifsOp.data.notifications.filter((n) => n.reason === 'like'),
+      notifsOp.data.notifications.filter(
+        (n) => n.reason === NOTIFICATION_REASON.LIKE,
+      ),
     )
     // Like from `alice` in previous test + `carol` on this test.
     expect(no).toHaveLength(2)
@@ -341,7 +411,7 @@ describe('notification views', () => {
 
     const nr = sortNotifs(
       notifsReposter.data.notifications.filter(
-        (n) => n.reason === 'like-via-repost',
+        (n) => n.reason === NOTIFICATION_REASON.LIKE_VIA_REPOST,
       ),
     )
     // Like from `alice` in previous test.
@@ -369,7 +439,9 @@ describe('notification views', () => {
     )
 
     const no = sortNotifs(
-      notifsOp.data.notifications.filter((n) => n.reason === 'repost'),
+      notifsOp.data.notifications.filter(
+        (n) => n.reason === NOTIFICATION_REASON.REPOST,
+      ),
     )
     // Repost from `carol` in seeds + `alice` on this test.
     expect(no).toHaveLength(2)
@@ -387,7 +459,7 @@ describe('notification views', () => {
 
     const nr = sortNotifs(
       notifsReposter.data.notifications.filter(
-        (n) => n.reason === 'repost-via-repost',
+        (n) => n.reason === NOTIFICATION_REASON.REPOST_VIA_REPOST,
       ),
     )
     // Repost from `alice` in this test.
@@ -404,7 +476,9 @@ describe('notification views', () => {
     )
     await network.processAll()
     const notifsBob1 = await agent.app.bsky.notification.listNotifications(
-      { reasons: ['verified', 'unverified'] },
+      {
+        reasons: [NOTIFICATION_REASON.VERIFIED, NOTIFICATION_REASON.UNVERIFIED],
+      },
       {
         headers: await network.serviceHeaders(
           sc.dids.bob,
@@ -419,7 +493,9 @@ describe('notification views', () => {
     await sc.unverify(sc.dids.alice, sc.dids.bob)
     await network.processAll()
     const notifsBob2 = await agent.app.bsky.notification.listNotifications(
-      { reasons: ['verified', 'unverified'] },
+      {
+        reasons: [NOTIFICATION_REASON.VERIFIED, NOTIFICATION_REASON.UNVERIFIED],
+      },
       {
         headers: await network.serviceHeaders(
           sc.dids.bob,
@@ -488,6 +564,40 @@ describe('notification views', () => {
     expect(results(paginatedAll)).toEqual(results([full.data]))
   })
 
+  it('returns a cursor only when more notifications are available', async () => {
+    const exact = await network.bsky.ctx.dataplane.getNotifications({
+      actorDid: alice,
+      limit: 13,
+    })
+    expect(exact.notifications).toHaveLength(13)
+    expect(exact.cursor).toBe('')
+
+    const over = await network.bsky.ctx.dataplane.getNotifications({
+      actorDid: alice,
+      limit: 12,
+    })
+    expect(over.notifications).toHaveLength(12)
+    expect(over.cursor).not.toBe('')
+
+    const headers = await network.serviceHeaders(
+      alice,
+      ids.AppBskyNotificationListNotifications,
+    )
+    const terminal = await agent.app.bsky.notification.listNotifications(
+      { limit: 13 },
+      { headers },
+    )
+    expect(terminal.data.notifications).toHaveLength(13)
+    expect(terminal.data.cursor).toBeUndefined()
+
+    const trimmed = await agent.app.bsky.notification.listNotifications(
+      { limit: 12 },
+      { headers },
+    )
+    expect(trimmed.data.notifications).toHaveLength(12)
+    expect(trimmed.data.cursor).toBeDefined()
+  })
+
   it('fetches notification count with a last-seen', async () => {
     const full = await agent.api.app.bsky.notification.listNotifications(
       {},
@@ -536,7 +646,7 @@ describe('notification views', () => {
     )
     expect(notifCount.data.count).toBeGreaterThan(0)
 
-    // reset last-seen
+    // An older client must not move the timestamp backward.
     await agent.api.app.bsky.notification.updateSeen(
       { seenAt: new Date(0).toISOString() },
       {
@@ -547,6 +657,18 @@ describe('notification views', () => {
         encoding: 'application/json',
       },
     )
+    const afterOlderUpdate =
+      await agent.api.app.bsky.notification.listNotifications(
+        {},
+        {
+          headers: await network.serviceHeaders(
+            alice,
+            ids.AppBskyNotificationListNotifications,
+          ),
+        },
+      )
+    expect(afterOlderUpdate.data.seenAt).toEqual(seenAt)
+    await clearNotificationSeen(db, alice)
   })
 
   it('fetches notifications with a last-seen', async () => {
@@ -585,17 +707,7 @@ describe('notification views', () => {
 
     const readStates = notifs.map((notif) => notif.isRead)
     expect(readStates).toEqual(notifs.map((n) => n.indexedAt < seenAt))
-    // reset last-seen
-    await agent.api.app.bsky.notification.updateSeen(
-      { seenAt: new Date(0).toISOString() },
-      {
-        headers: await network.serviceHeaders(
-          alice,
-          ids.AppBskyNotificationUpdateSeen,
-        ),
-        encoding: 'application/json',
-      },
-    )
+    await clearNotificationSeen(db, alice)
   })
 
   it('fetches notifications omitting mentions and replies for taken-down posts', async () => {
@@ -643,85 +755,10 @@ describe('notification views', () => {
     )
   })
 
-  it('fetches notifications with explicit priority', async () => {
-    const priority = await agent.api.app.bsky.notification.listNotifications(
-      { priority: true },
-      {
-        headers: await network.serviceHeaders(
-          sc.dids.carol,
-          ids.AppBskyNotificationListNotifications,
-        ),
-      },
-    )
-    // only notifs from follow (alice)
-    expect(
-      priority.data.notifications.every(
-        (notif) =>
-          !([sc.dids.bob, sc.dids.dan] as string[]).includes(notif.author.did),
-      ),
-    ).toBe(true)
-    expect(forSnapshot(priority.data)).toMatchSnapshot()
-    const noPriority = await agent.api.app.bsky.notification.listNotifications(
-      { priority: false },
-      {
-        headers: await network.serviceHeaders(
-          sc.dids.carol,
-          ids.AppBskyNotificationListNotifications,
-        ),
-      },
-    )
-    expect(forSnapshot(noPriority.data)).toMatchSnapshot()
-  })
-
-  it('fetches notifications with default priority', async () => {
-    await agent.api.app.bsky.notification.putPreferences(
-      { priority: true },
-      {
-        encoding: 'application/json',
-        headers: await network.serviceHeaders(
-          sc.dids.carol,
-          ids.AppBskyNotificationPutPreferences,
-        ),
-      },
-    )
-    await network.processAll()
-    const notifs = await agent.api.app.bsky.notification.listNotifications(
-      {},
-      {
-        headers: await network.serviceHeaders(
-          sc.dids.carol,
-          ids.AppBskyNotificationListNotifications,
-        ),
-      },
-    )
-    // only notifs from follow (alice)
-    expect(
-      notifs.data.notifications.every(
-        (notif) =>
-          !([sc.dids.bob, sc.dids.dan] as string[]).includes(notif.author.did),
-      ),
-    ).toBe(true)
-    expect(forSnapshot(notifs.data)).toMatchSnapshot()
-    await agent.api.app.bsky.notification.putPreferences(
-      { priority: false },
-      {
-        encoding: 'application/json',
-        headers: await network.serviceHeaders(
-          sc.dids.carol,
-          ids.AppBskyNotificationPutPreferences,
-        ),
-      },
-    )
-    await network.processAll()
-  })
-
-  // @NOTE there is some flakyness between these tests. We sometimes get
-  // "priority": true when the snapshot expects false.
-
   it('filters notifications by reason', async () => {
     const res = await agent.app.bsky.notification.listNotifications(
       {
-        reasons: ['mention'],
+        reasons: [NOTIFICATION_REASON.MENTION],
       },
       {
         headers: await network.serviceHeaders(
@@ -737,7 +774,7 @@ describe('notification views', () => {
   it('filters notifications by multiple reasons', async () => {
     const res = await agent.app.bsky.notification.listNotifications(
       {
-        reasons: ['mention', 'reply'],
+        reasons: [NOTIFICATION_REASON.MENTION, NOTIFICATION_REASON.REPLY],
       },
       {
         headers: await network.serviceHeaders(
@@ -756,7 +793,11 @@ describe('notification views', () => {
     ) => sortNotifs(results.flatMap((res) => res.notifications))
     const paginator = async (cursor?: string) => {
       const res = await agent.app.bsky.notification.listNotifications(
-        { reasons: ['mention', 'reply'], cursor, limit: 2 },
+        {
+          reasons: [NOTIFICATION_REASON.MENTION, NOTIFICATION_REASON.REPLY],
+          cursor,
+          limit: 2,
+        },
         {
           headers: await network.serviceHeaders(
             alice,
@@ -768,12 +809,13 @@ describe('notification views', () => {
     }
 
     const paginatedAll = await paginateAll(paginator)
+    expect(paginatedAll[0].notifications.length).toBeGreaterThan(0)
     paginatedAll.forEach((res) =>
       expect(res.notifications.length).toBeLessThanOrEqual(2),
     )
 
     const full = await agent.app.bsky.notification.listNotifications(
-      { reasons: ['mention', 'reply'] },
+      { reasons: [NOTIFICATION_REASON.MENTION, NOTIFICATION_REASON.REPLY] },
       {
         headers: await network.serviceHeaders(
           alice,
@@ -797,12 +839,15 @@ describe('notification views', () => {
         'no thanks',
       )
       await network.processAll()
-      await createTag(db, { uri: eveReply.ref.uri.toString(), val: TAG_HIDE })
+      await createTag(db, {
+        uri: eveReply.ref.uri.toString(),
+        val: seedThreadV2.TAG_HIDE,
+      })
     })
 
     it('filters posts with hide tag', async () => {
       const results = await agent.app.bsky.notification.listNotifications(
-        { reasons: ['reply'] },
+        { reasons: [NOTIFICATION_REASON.REPLY] },
         {
           headers: await network.serviceHeaders(
             dan,
@@ -818,7 +863,7 @@ describe('notification views', () => {
       await sc.follow(dan, eve)
       await network.processAll()
       const results = await agent.app.bsky.notification.listNotifications(
-        { reasons: ['reply'] },
+        { reasons: [NOTIFICATION_REASON.REPLY] },
         {
           headers: await network.serviceHeaders(
             dan,
@@ -837,7 +882,7 @@ describe('notification views', () => {
     let delayNetwork: TestNetwork
     let delayAgent: AtpAgent
     let delaySc: SeedClient
-    let delayAlice: string
+    let delayAlice: DidString
 
     beforeAll(async () => {
       delayNetwork = await TestNetwork.create({
@@ -864,19 +909,11 @@ describe('notification views', () => {
 
       // @NOTE: Use fake timers after inserting seed data,
       // to avoid inserting all notifications with the same timestamp.
-      jest.useFakeTimers({
-        doNotFake: [
-          'nextTick',
-          'performance',
-          'setImmediate',
-          'setInterval',
-          'setTimeout',
-        ],
-      })
+      vi.useFakeTimers({ toFake: ['Date'] })
     })
 
     afterAll(async () => {
-      jest.useRealTimers()
+      vi.useRealTimers()
       await delayNetwork.close()
     })
 
@@ -889,7 +926,7 @@ describe('notification views', () => {
         .executeTakeFirstOrThrow()
       // Sets the system time to when the first notification happened.
       // At this point we won't have any notifications that already crossed the delay threshold.
-      jest.setSystemTime(new Date(firstNotification.sortAt))
+      vi.setSystemTime(new Date(firstNotification.sortAt))
 
       const results = (
         results: AppBskyNotificationListNotifications.OutputSchema[],
@@ -936,7 +973,7 @@ describe('notification views', () => {
         .executeTakeFirstOrThrow()
       // Sets the system time to when the last notification happened and the delay has elapsed.
       // At this point we all notifications already crossed the delay threshold.
-      jest.setSystemTime(
+      vi.setSystemTime(
         new Date(
           new Date(lastNotification.sortAt).getTime() +
             notificationsDelayMs +
@@ -975,12 +1012,12 @@ describe('notification views', () => {
       const nowMinus8s = '2021-01-01T00:59:52.000Z'
 
       beforeAll(async () => {
-        jest.useFakeTimers({ doNotFake: ['performance'] })
-        jest.setSystemTime(new Date(now))
+        vi.useFakeTimers({ toFake: ['Date'] })
+        vi.setSystemTime(new Date(now))
       })
 
       afterAll(async () => {
-        jest.useRealTimers()
+        vi.useRealTimers()
       })
 
       describe('for undefined cursor', () => {
@@ -1027,6 +1064,9 @@ describe('notification views', () => {
 
   describe('preferences v2', () => {
     beforeEach(async () => {
+      // Drain pending bsync ops before clearing, so a stale op can't land
+      // after the reset.
+      await network.processAll()
       await clearPrivateData(db)
     })
 
@@ -1143,6 +1183,52 @@ describe('notification views', () => {
       await getAndAssert(expectedApi1, expectedDb1)
     })
 
+    it('maps legacy priority onto granular preferences', async () => {
+      const actorDid = sc.dids.carol
+      const headers = await network.serviceHeaders(
+        actorDid,
+        ids.AppBskyNotificationPutPreferencesV2,
+      )
+      await agent.app.bsky.notification.putPreferencesV2(
+        {
+          reply: { include: 'all', list: false, push: false },
+          mention: { include: 'all', list: false, push: true },
+          quote: { include: 'all', list: true, push: false },
+          verified: { list: false, push: false },
+        },
+        { encoding: 'application/json', headers },
+      )
+      await network.processAll()
+
+      await agent.app.bsky.notification.putPreferences(
+        { priority: true },
+        {
+          encoding: 'application/json',
+          headers: await network.serviceHeaders(
+            actorDid,
+            ids.AppBskyNotificationPutPreferences,
+          ),
+        },
+      )
+      await network.processAll()
+
+      const preferences = await agent.app.bsky.notification.getPreferences(
+        {},
+        {
+          headers: await network.serviceHeaders(
+            actorDid,
+            ids.AppBskyNotificationGetPreferences,
+          ),
+        },
+      )
+      expect(preferences.data.preferences).toMatchObject({
+        reply: { include: 'follows', list: false, push: false },
+        mention: { include: 'follows', list: false, push: true },
+        quote: { include: 'follows', list: true, push: false },
+        verified: { list: false, push: false },
+      })
+    })
+
     it('stores the preferences setting the defaults', async () => {
       const actorDid = sc.dids.carol
 
@@ -1193,9 +1279,11 @@ describe('notification views', () => {
           push: false,
           include: 'accepted',
         },
+        injected: true,
       }
       const expected0: AppBskyNotificationDefs.Preferences = {
-        chat: input0.chat,
+        // chat is deprecated: input is ignored and the default is always returned.
+        chat: cp,
         follow: fp,
         like: fp,
         likeViaRepost: fp,
@@ -1219,8 +1307,8 @@ describe('notification views', () => {
         },
       }
       const expected1: AppBskyNotificationDefs.Preferences = {
-        // Kept from the previous call.
-        chat: input0.chat,
+        // chat is deprecated: input is ignored and the default is always returned.
+        chat: cp,
         follow: fp,
         like: fp,
         likeViaRepost: fp,
@@ -1243,7 +1331,7 @@ describe('notification views', () => {
       return profiles.sort((a, b) => (a.handle > b.handle ? 1 : -1))
     }
 
-    const declare = async (actor: string, value: string) => {
+    const declare = async (actor: DidString, value: string) => {
       await pdsAgent.com.atproto.repo.createRecord(
         {
           repo: actor,
@@ -1258,8 +1346,8 @@ describe('notification views', () => {
     }
 
     const put = async (
-      actor: string,
-      subject: string,
+      actor: DidString,
+      subject: DidString,
       val: AppBskyNotificationDefs.ActivitySubscription,
     ) =>
       agent.app.bsky.notification.putActivitySubscription(
@@ -1276,7 +1364,7 @@ describe('notification views', () => {
       )
 
     const list = async (
-      actor: string,
+      actor: DidString,
       params?: AppBskyNotificationListActivitySubscriptions.QueryParams,
     ) =>
       agent.app.bsky.notification.listActivitySubscriptions(params ?? {}, {
@@ -1344,6 +1432,9 @@ describe('notification views', () => {
     })
 
     beforeEach(async () => {
+      // Drain pending bsync ops before clearing, so a stale op can't land
+      // after the reset.
+      await network.processAll()
       await clearActivitySubscription(db)
     })
 
@@ -1373,10 +1464,10 @@ describe('notification views', () => {
         subject: subjectDid,
         activitySubscription: val,
       })
+      await network.processAll()
 
       const { data: listData } = await list(actorDid)
       expect(listData).toEqual({
-        cursor: expect.any(String),
         subscriptions: [
           expect.objectContaining({
             did: subjectDid,
@@ -1397,16 +1488,17 @@ describe('notification views', () => {
         subject: subjectDid,
         activitySubscription: valCreate,
       })
+      await network.processAll()
 
       const { data: updateData } = await put(actorDid, subjectDid, valUpdate)
       expect(updateData).toStrictEqual({
         subject: subjectDid,
         activitySubscription: valUpdate,
       })
+      await network.processAll()
 
       const { data: listData } = await list(actorDid)
       expect(listData).toEqual({
-        cursor: expect.any(String),
         subscriptions: [
           expect.objectContaining({
             did: subjectDid,
@@ -1425,10 +1517,12 @@ describe('notification views', () => {
       const valDelete = { post: false, reply: false }
 
       await put(actorDid, subjectDid, valCreate)
+      await network.processAll()
       const { data: list0 } = await list(actorDid)
       expect(list0.subscriptions).toHaveLength(1)
 
       await put(actorDid, subjectDid, valDelete)
+      await network.processAll()
       const { data: list1 } = await list(actorDid)
       expect(list1.subscriptions).toHaveLength(0)
     })
@@ -1444,6 +1538,41 @@ describe('notification views', () => {
       await put(actorDid, eve, val)
       await put(actorDid, fred, val)
       await put(actorDid, blocked, val) // blocked is removed from the list.
+      await network.processAll()
+
+      const exact =
+        await network.bsky.ctx.dataplane.getActivitySubscriptionDids({
+          actorDid,
+          limit: 6,
+        })
+      expect(exact.dids).toHaveLength(6)
+      expect(exact.cursor).toBe('')
+
+      const over = await network.bsky.ctx.dataplane.getActivitySubscriptionDids(
+        {
+          actorDid,
+          limit: 5,
+        },
+      )
+      expect(over.dids).toHaveLength(5)
+      expect(over.cursor).not.toBe('')
+
+      // The blocked subscriber is filtered out, so this page is short of the
+      // requested limit and carries a cursor onto the remaining subscriber.
+      const filtered = await list(actorDid, { limit: 5 })
+      expect(filtered.data.subscriptions).toHaveLength(4)
+      expect(filtered.data.cursor).toBeDefined()
+
+      const terminal = await list(actorDid, {
+        limit: 5,
+        cursor: filtered.data.cursor,
+      })
+      expect(terminal.data.subscriptions).toHaveLength(1)
+      expect(terminal.data.cursor).toBeUndefined()
+
+      const trimmed = await list(actorDid, { limit: 4 })
+      expect(trimmed.data.subscriptions).toHaveLength(3)
+      expect(trimmed.data.cursor).toBeDefined()
 
       const results = (
         results: AppBskyNotificationListActivitySubscriptions.OutputSchema[],
@@ -1460,6 +1589,7 @@ describe('notification views', () => {
       }
 
       const paginatedAll = await paginateAll(paginator)
+      expect(paginatedAll[0].subscriptions.length).toBeGreaterThan(0)
       paginatedAll.forEach((res) =>
         expect(res.subscriptions.length).toBeLessThanOrEqual(limit),
       )
@@ -1497,24 +1627,29 @@ describe('notification views', () => {
 
         // 'none' declaration.
         await put(viewer, bob, val)
+        await network.processAll()
         await expect(viewerActivitySub(viewer, bob)).resolves.toBeUndefined()
 
         // 'mutuals' declaration and both follow.
         await put(viewer, carol, val)
+        await network.processAll()
         await expect(viewerActivitySub(viewer, carol)).resolves.toStrictEqual(
           val,
         )
 
         // 'mutuals' declaration but only actor follows.
         await put(viewer, dan, val)
+        await network.processAll()
         await expect(viewerActivitySub(viewer, dan)).resolves.toBeUndefined()
 
         // 'mutuals' declaration but only subject follows.
         await put(viewer, eve, val)
+        await network.processAll()
         await expect(viewerActivitySub(viewer, eve)).resolves.toBeUndefined()
 
         // 'followers' declaration and viewer follows.
         await put(viewer, fred, val)
+        await network.processAll()
         await expect(viewerActivitySub(viewer, carol)).resolves.toStrictEqual(
           val,
         )

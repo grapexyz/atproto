@@ -49,7 +49,8 @@
           "refs": [
             "com.atproto.admin.defs#repoRef",
             "com.atproto.repo.strongRef",
-            "chat.bsky.convo.defs#messageRef"
+            "chat.bsky.convo.defs#messageRef",
+            "chat.bsky.convo.defs#convoRef"
           ]
         },
         "subjectBlobCids": { "type": "array", "items": { "type": "string" } },
@@ -108,7 +109,8 @@
             "#repoView",
             "#repoViewNotFound",
             "#recordView",
-            "#recordViewNotFound"
+            "#recordViewNotFound",
+            "#convoView"
           ]
         },
         "subjectBlobs": {
@@ -130,7 +132,8 @@
           "refs": [
             "com.atproto.admin.defs#repoRef",
             "com.atproto.repo.strongRef",
-            "chat.bsky.convo.defs#messageRef"
+            "chat.bsky.convo.defs#messageRef",
+            "chat.bsky.convo.defs#convoRef"
           ]
         },
         "hosting": {
@@ -469,6 +472,21 @@
       "description": "Report a subject",
       "required": ["reportType"],
       "properties": {
+        "appealSubmittedBy": {
+          "type": "string",
+          "format": "did",
+          "description": "Moderator who submitted this appeal on behalf of the affected account. Returned by moderator event APIs."
+        },
+        "appealActionType": {
+          "type": "string",
+          "description": "Action reference type recorded when this appeal was submitted."
+        },
+        "appealActionId": {
+          "type": "integer"
+        },
+        "appealLabel": {
+          "type": "string"
+        },
         "comment": {
           "type": "string"
         },
@@ -739,6 +757,10 @@
         "comment": {
           "type": "string",
           "description": "Additional comment about added/removed tags."
+        },
+        "durationInHours": {
+          "type": "integer",
+          "description": "Indicates how long the tags being added should remain before automatically being removed. Only applies to tags being added."
         }
       }
     },
@@ -955,6 +977,14 @@
       "required": ["uri"],
       "properties": {
         "uri": { "type": "string", "format": "at-uri" }
+      }
+    },
+    "convoView": {
+      "type": "object",
+      "required": ["did", "convoId"],
+      "properties": {
+        "did": { "type": "string", "format": "did" },
+        "convoId": { "type": "string" }
       }
     },
     "moderation": {

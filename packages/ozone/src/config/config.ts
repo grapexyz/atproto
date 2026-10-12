@@ -1,6 +1,17 @@
 import assert from 'node:assert'
 import { DAY, HOUR, MINUTE } from '@atproto/common'
-import { OzoneEnvironment } from './env'
+import {
+  type DatetimeString,
+  type DidString,
+  type UriString,
+  isDatetimeString,
+  toDatetimeString,
+} from '@atproto/lex'
+import type { OzoneEnvironment } from './env.js'
+import {
+  type StrikeSuspensionConfig,
+  parseStrikeSuspensionConfig,
+} from './strike-suspension.js'
 
 // off-config but still from env:
 // logging: LOG_LEVEL, LOG_SYSTEMS, LOG_ENABLED, LOG_DESTINATION
@@ -11,11 +22,18 @@ export const envToCfg = (env: OzoneEnvironment): OzoneConfig => {
   assert(env.serverDid, 'serverDid is required')
   const serviceCfg: OzoneConfig['service'] = {
     port,
+    // Intentionally has no default: metrics are opt-in. When unset, the metrics
+    // server is never started (off by default for 3p labelers/self-hosters).
+    metricsPort: env.metricsPort,
+    // Separate opt-in metrics port for the daemon process (runs in its own
+    // container, so it needs its own scrape target). No default for the same reason.
+    daemonMetricsPort: env.daemonMetricsPort,
     publicUrl: env.publicUrl,
     did: env.serverDid,
     version: env.version,
     devMode: env.devMode,
     serviceRecordCacheTTL: env.serviceRecordCacheTTL ?? 5 * MINUTE, // default 5 mins
+    labelQueryWildcardsEnabled: env.labelQueryWildcardsEnabled ?? false,
   }
 
   assert(env.dbPostgresUrl, 'dbPostgresUrl is required')
@@ -26,6 +44,7 @@ export const envToCfg = (env: OzoneEnvironment): OzoneConfig => {
     poolMaxUses: env.dbPoolMaxUses,
     poolIdleTimeoutMs: env.dbPoolIdleTimeoutMs,
     materializedViewRefreshIntervalMs: env.dbMaterializedViewRefreshIntervalMs,
+    materializedViewRefreshTimeoutMs: env.dbMaterializedViewRefreshTimeoutMs,
     teamProfileRefreshIntervalMs: env.dbTeamProfileRefreshIntervalMs,
   }
 
@@ -90,6 +109,21 @@ export const envToCfg = (env: OzoneEnvironment): OzoneConfig => {
         }
       : null
 
+  const assignmentsCfg: OzoneConfig['assignments'] = {
+    queueDurationMs: env.assignmentQueueDurationMs ?? 5 * MINUTE,
+    reportDurationMs: env.assignmentReportDurationMs ?? 5 * MINUTE,
+  }
+
+  const inboxCfg: OzoneConfig['inbox'] = {
+    appealWindowMonths: env.inboxAppealWindowMonths ?? 6,
+    policyDefaultUrl: env.inboxPolicyDefaultUrl ?? DEFAULT_INBOX_POLICY_URL,
+    startAt: parseInboxStartAt(env.inboxStartAt),
+  }
+
+  const statsCfg: OzoneConfig['stats'] = {
+    computerIntervalMinutes: env.statsComputerIntervalMinutes ?? 15,
+  }
+
   return {
     service: serviceCfg,
     db: dbCfg,
@@ -101,6 +135,10 @@ export const envToCfg = (env: OzoneEnvironment): OzoneConfig => {
     blobDivert: blobDivertServiceCfg,
     access: accessCfg,
     verifier: verifierCfg,
+    assignments: assignmentsCfg,
+    inbox: inboxCfg,
+    strikeSuspension: parseStrikeSuspensionConfig(env.strikeSuspensionConfig),
+    stats: statsCfg,
     jetstreamUrl: env.jetstreamUrl,
   }
 }
@@ -115,21 +153,43 @@ export type OzoneConfig = {
   identity: IdentityConfig
   blobDivert: BlobDivertConfig | null
   access: AccessConfig
+  assignments: AssignmentsConfig
+  strikeSuspension: StrikeSuspensionConfig
+  inbox: InboxConfig
+  stats: StatsConfig
   jetstreamUrl?: string
   verifier: VerifierConfig | null
 }
 
+export type StatsConfig = {
+  /**
+   * Minutes between stats computer cycles.
+   * Defaults to 15. Minimum is 1.
+   * Set to -1 to disable the stats computer.
+   */
+  computerIntervalMinutes: number
+}
+
 export type ServiceConfig = {
   port: number
+  // Port for the separate, pull-based Prometheus /metrics server. Optional and
+  // off by default: when undefined, no metrics server is started and no metrics
+  // are collected. Bluesky's first-party deploy sets OZONE_METRICS_PORT to opt in.
+  metricsPort?: number
+  // Metrics port for the daemon process (separate container/scrape target).
+  // Optional and off by default; set via OZONE_DAEMON_METRICS_PORT.
+  daemonMetricsPort?: number
   publicUrl: string
-  did: string
+  did: DidString
   version?: string
   devMode?: boolean
   serviceRecordCacheTTL: number // in ms, default 5 mins
+  /** Allow wildcard label queries; disabled by default. */
+  labelQueryWildcardsEnabled?: boolean
 }
 
 export type BlobDivertConfig = {
-  url: string
+  url: UriString
   adminPassword: string
 }
 
@@ -140,23 +200,24 @@ export type DatabaseConfig = {
   poolMaxUses?: number
   poolIdleTimeoutMs?: number
   materializedViewRefreshIntervalMs?: number
+  materializedViewRefreshTimeoutMs?: number
   teamProfileRefreshIntervalMs?: number
 }
 
 export type AppviewConfig = {
-  url: string
-  did: string
+  url: UriString
+  did: DidString
   pushEvents: boolean
 }
 
 export type PdsConfig = {
-  url: string
-  did: string
+  url: UriString
+  did: DidString
 }
 
 export type ChatConfig = {
-  url: string
-  did: string
+  url: UriString
+  did: DidString
 }
 
 export type CdnConfig = {
@@ -170,15 +231,54 @@ export type IdentityConfig = {
 }
 
 export type AccessConfig = {
-  admins: string[]
-  moderators: string[]
-  triage: string[]
+  admins: DidString[]
+  moderators: DidString[]
+  triage: DidString[]
 }
 
 export type VerifierConfig = {
-  url: string
-  did: string
+  url: UriString
+  did: DidString
   password: string
   jetstreamUrl?: string
   issuersToIndex?: string[]
+}
+
+export type InboxConfig = {
+  /** Inclusive creation-time cutoff for inbox history; unset exposes all history. */
+  startAt?: DatetimeString
+  /**
+   * Calendar months a moderation action stays appealable, counted from the
+   * action. Defaults to 6.
+   *
+   * Configured rather than hardcoded so the window is a policy decision the
+   * deployment owns, and can be changed without shipping code.
+   */
+  appealWindowMonths: number
+  /** Fallback link for takedown policy keys missing from the policy list. */
+  policyDefaultUrl?: string
+}
+
+export const DEFAULT_INBOX_POLICY_URL =
+  'https://bsky.social/about/support/community-guidelines'
+
+function parseInboxStartAt(
+  value: string | undefined,
+): DatetimeString | undefined {
+  if (value === undefined) return undefined
+  assert(
+    isDatetimeString(value),
+    'OZONE_INBOX_START_AT must be an ISO 8601 timestamp with a timezone',
+  )
+  const normalized = toDatetimeString(new Date(value))
+  assert(
+    /^\d{4}-/.test(normalized),
+    'OZONE_INBOX_START_AT must use a four-digit UTC year',
+  )
+  return normalized
+}
+
+export type AssignmentsConfig = {
+  queueDurationMs: number
+  reportDurationMs: number
 }

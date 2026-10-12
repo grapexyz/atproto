@@ -1,19 +1,20 @@
 import { assert, describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { LexValue, cidForLex } from '@atproto/lex-cbor'
-import { cidForRawBytes, parseCid } from '@atproto/lex-data'
+import { type LexValue, cidForLex } from '@atproto/lex-cbor'
+import { cidForRawBytes, isTypedBlobRef, parseCid } from '@atproto/lex-data'
 import { lexParse, lexToJson } from '@atproto/lex-json'
 import {
-  $Typed,
+  type $Typed,
   LexValidationError,
-  toDatetimeString,
+  currentDatetimeString,
 } from '@atproto/lex-schema'
 import {
-  Action,
+  type Action,
   Client,
-  FetchHandler,
+  type FetchHandler,
   XrpcAuthenticationError,
   XrpcInvalidResponseError,
   XrpcResponseError,
+  buildAgent,
 } from '../src/index.js'
 import { app, com } from './lexicons/index.js'
 
@@ -59,6 +60,254 @@ describe('utils', () => {
 })
 
 describe('Client', () => {
+  describe('atproto-* headers', () => {
+    it('defaults "service" to atproto-proxy headers set through the per-request headers option', async () => {
+      const fetchHandler = vi.fn<FetchHandler>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const client = new Client(fetchHandler)
+
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        headers: {
+          'atproto-proxy': 'did:plc:existing#service',
+        },
+      })
+
+      expect(fetchHandler).toHaveBeenCalledOnce()
+
+      const [_url, init] = fetchHandler.mock.calls[0]
+      const headers = new Headers(init?.headers)
+
+      expect(headers.get('atproto-proxy')).toBe('did:plc:existing#service')
+    })
+
+    it('uses the "atproto-proxy" header as fallback for the "service" option', async () => {
+      const fetchHandler = vi.fn<FetchHandler>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const client = new Client(fetchHandler, {
+        headers: { 'atproto-proxy': 'did:plc:existing#service' },
+      })
+
+      expect(client.service).toBe('did:plc:existing#service')
+
+      await client.xrpc(app.bsky.actor.getPreferences)
+
+      // A per-request "service" still overrides the header-provided default
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        service: 'did:plc:new#service',
+      })
+
+      // And "service: null" disables it
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        service: null,
+      })
+
+      expect(fetchHandler).toHaveBeenCalledTimes(3)
+
+      const proxies = fetchHandler.mock.calls.map(([, init]) =>
+        new Headers(init?.headers).get('atproto-proxy'),
+      )
+      expect(proxies).toEqual([
+        'did:plc:existing#service',
+        'did:plc:new#service',
+        null,
+      ])
+    })
+
+    it('uses global "service" and "labelers" options for requests', async () => {
+      const service = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz#bsky_appview'
+      const labeler = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
+
+      const fetchHandler = vi.fn<FetchHandler>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const client = new Client(fetchHandler, { service, labelers: [labeler] })
+
+      await client.xrpc(app.bsky.actor.getPreferences)
+
+      expect(fetchHandler).toHaveBeenCalledOnce()
+
+      const [_url, init] = fetchHandler.mock.calls[0]
+      const headers = new Headers(init?.headers)
+      expect(headers.get('atproto-proxy')).toBe(service)
+      expect(headers.get('atproto-accept-labelers')).toBe(labeler)
+    })
+
+    it('allows default proxy and labeler headers to be overridden per request', async () => {
+      const service = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz#bsky_appview'
+      const labeler = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
+
+      const fetchHandler = vi.fn<FetchHandler>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const client = new Client(fetchHandler, { service, labelers: [labeler] })
+
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        service: 'did:plc:new#service',
+        labelers: ['did:plc:new'],
+      })
+
+      expect(fetchHandler).toHaveBeenCalledOnce()
+
+      const [_url, init] = fetchHandler.mock.calls[0]
+      const headers = new Headers(init?.headers)
+      expect(headers.get('atproto-proxy')).toBe('did:plc:new#service')
+      expect(headers.get('atproto-accept-labelers')).toBe('did:plc:new')
+    })
+
+    it('allows default proxy and labeler headers to be disabled per request', async () => {
+      const service = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz#bsky_appview'
+      const labeler = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
+
+      const fetchHandler = vi.fn<FetchHandler>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const client = new Client(fetchHandler, { service, labelers: [labeler] })
+
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        service: null,
+        labelers: null,
+      })
+
+      expect(fetchHandler).toHaveBeenCalledOnce()
+
+      const [_url, init] = fetchHandler.mock.calls[0]
+      const headers = new Headers(init?.headers)
+      expect(headers.has('atproto-proxy')).toBe(false)
+      expect(headers.has('atproto-accept-labelers')).toBe(false)
+    })
+
+    it('applies defaults when "service" and "labelers" are explicitly undefined', async () => {
+      const service = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz#bsky_appview'
+      const labeler = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
+
+      const fetchHandler = vi.fn<FetchHandler>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const client = new Client(fetchHandler, { service, labelers: [labeler] })
+
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        service: undefined,
+        labelers: undefined,
+      })
+
+      expect(fetchHandler).toHaveBeenCalledOnce()
+
+      const [_url, init] = fetchHandler.mock.calls[0]
+      const headers = new Headers(init?.headers)
+      expect(headers.get('atproto-proxy')).toBe(service)
+      expect(headers.get('atproto-accept-labelers')).toBe(labeler)
+    })
+
+    it('ignores the client\'s default "service" and "labelers" in record helper methods', async () => {
+      const service = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz#bsky_appview'
+      const labeler = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
+      const did = 'did:plc:alice'
+
+      const fetchHandler = vi.fn<FetchHandler>(async (url, _init) => {
+        if (url.includes('listRecords')) {
+          return Response.json({ records: [] })
+        }
+        return Response.json({
+          uri: `at://${did}/app.bsky.feed.post/2222222222222`,
+          cid: 'bafyreidfayvfuwqa7qlnopdjiqrxzs6blmoeu4rujcjtnci5beludirz2a',
+        })
+      })
+
+      const client = new Client(
+        { fetchHandler, did },
+        { service, labelers: [labeler] },
+      )
+
+      await client.createRecord(
+        app.bsky.feed.post.$build({
+          text: 'Hello!',
+          createdAt: currentDatetimeString(),
+        }),
+      )
+      await client.listRecords(app.bsky.feed.post.$type)
+
+      expect(fetchHandler).toHaveBeenCalledTimes(2)
+      for (const [, init] of fetchHandler.mock.calls) {
+        const headers = new Headers(init?.headers)
+        expect(headers.has('atproto-proxy')).toBe(false)
+        expect(headers.has('atproto-accept-labelers')).toBe(false)
+      }
+
+      // Explicit per-call options still apply
+      await client.listRecords(app.bsky.feed.post.$type, {
+        service,
+        labelers: [labeler],
+      })
+
+      const [, init] = fetchHandler.mock.calls[2]
+      const headers = new Headers(init?.headers)
+      expect(headers.get('atproto-proxy')).toBe(service)
+      expect(headers.get('atproto-accept-labelers')).toBe(labeler)
+    })
+
+    it('propagates custom (non atproto-*) headers when composing clients', async () => {
+      const fetch = vi.fn<typeof globalThis.fetch>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const agent = buildAgent({
+        fetch,
+        service: 'https://base.example.com',
+        headers: { 'x-base': 'base', 'x-shared': 'base' },
+      })
+
+      const client = new Client(agent)
+
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        headers: { 'x-child': 'child', 'x-shared': 'child' },
+      })
+
+      expect(fetch).toHaveBeenCalledOnce()
+
+      const [_url, init] = fetch.mock.calls[0]
+      const headers = Object.fromEntries(new Headers(init?.headers))
+
+      expect(headers).toMatchObject({
+        'x-base': 'base',
+        'x-child': 'child',
+        'x-shared': 'child',
+      })
+    })
+
+    it('always adds the static labelers as "redact" labelers', async () => {
+      using _ = vi
+        .spyOn(Client, 'appLabelers', 'get')
+        .mockReturnValue(['did:plc:staticlabeler'])
+
+      const fetchHandler = vi.fn<FetchHandler>(async (_url, _init) => {
+        return Response.json({ preferences: [] })
+      })
+
+      const client = new Client(fetchHandler)
+
+      await client.xrpc(app.bsky.actor.getPreferences, {
+        labelers: ['did:plc:dynamiclabeler'],
+      })
+
+      expect(fetchHandler).toHaveBeenCalledOnce()
+
+      const [_url, init] = fetchHandler.mock.calls[0]
+      const headers = new Headers(init?.headers)
+
+      expect(headers.get('atproto-accept-labelers')).toBe(
+        'did:plc:staticlabeler;redact, did:plc:dynamiclabeler',
+      )
+    })
+  })
+
   describe('actions', () => {
     it('updatePreferences', async () => {
       const fetchHandler = vi.fn<FetchHandler>(async (url, init) => {
@@ -86,7 +335,7 @@ describe('Client', () => {
         }
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       const updatePreferences: Action<
         (pref: Preference[]) => false | Preference[],
@@ -215,7 +464,7 @@ describe('Client', () => {
         })
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       const { preferences } = await client.call(app.bsky.actor.getPreferences)
 
@@ -252,7 +501,7 @@ describe('Client', () => {
         )
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       await expect(
         client.call(app.bsky.actor.getPreferences),
@@ -270,7 +519,7 @@ describe('Client', () => {
         return new Response(null, { status: 429 })
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       await expect(
         client.call(app.bsky.actor.getPreferences),
@@ -287,7 +536,7 @@ describe('Client', () => {
         return new Response(null, { status: 302 })
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       await expect(
         client.call(app.bsky.actor.getPreferences),
@@ -306,7 +555,7 @@ describe('Client', () => {
         })
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       await expect(
         client.call(app.bsky.actor.getPreferences),
@@ -335,7 +584,7 @@ describe('Client', () => {
         )
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       await expect(
         client.call(app.bsky.actor.getPreferences),
@@ -369,7 +618,7 @@ describe('Client', () => {
         )
       })
 
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
 
       const response = await client.xrpcSafe(app.bsky.actor.getPreferences)
 
@@ -465,7 +714,7 @@ describe('Client', () => {
       const aliceGenerator = await client.create(app.bsky.feed.generator, {
         did,
         displayName: 'Alice Generator',
-        createdAt: toDatetimeString(new Date()),
+        createdAt: currentDatetimeString(),
       })
 
       expect(nextTid).toHaveBeenCalledTimes(1)
@@ -485,7 +734,7 @@ describe('Client', () => {
 
       const newPost = await client.create(app.bsky.feed.post, {
         text: 'Hello, world!',
-        createdAt: toDatetimeString(new Date()),
+        createdAt: currentDatetimeString(),
       })
 
       expect(nextTid).toHaveBeenCalledTimes(2)
@@ -575,12 +824,13 @@ describe('Client', () => {
     )
 
     it('allows uploading blobs', async () => {
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
       const blob = new Blob(['hello world'], { type: 'text/plain' })
 
       const { body } = await client.uploadBlob(blob)
 
       expect(fetchHandler).toHaveBeenCalledTimes(1)
+      assert(isTypedBlobRef(body.blob))
       expect(body.blob.$type).toBe('blob')
       expect(body.blob.mimeType).toBe('text/plain')
       expect(body.blob.size).toBe(11)
@@ -590,12 +840,13 @@ describe('Client', () => {
     })
 
     it('allows uploading blobs from Uint8Array', async () => {
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
       const data = new TextEncoder().encode('hello world')
 
       const { body } = await client.uploadBlob(data)
 
       expect(fetchHandler).toHaveBeenCalledTimes(2)
+      assert(isTypedBlobRef(body.blob))
       expect(body.blob.$type).toBe('blob')
       expect(body.blob.mimeType).toBe('application/octet-stream')
       expect(body.blob.size).toBe(11)
@@ -605,12 +856,13 @@ describe('Client', () => {
     })
 
     it('allows uploading blobs from ArrayBuffer', async () => {
-      const client = new Client({ fetchHandler })
+      const client = new Client(fetchHandler)
       const data = new TextEncoder().encode('hello world').buffer
 
       const { body } = await client.uploadBlob(data)
 
       expect(fetchHandler).toHaveBeenCalledTimes(3)
+      assert(isTypedBlobRef(body.blob))
       expect(body.blob.$type).toBe('blob')
       expect(body.blob.mimeType).toBe('application/octet-stream')
       expect(body.blob.size).toBe(11)
@@ -635,7 +887,7 @@ describe('Client', () => {
               // @ts-expect-error invalid DID
               did: 'not-a-did',
               displayName: 'Test',
-              createdAt: toDatetimeString(new Date()),
+              createdAt: currentDatetimeString(),
             },
             { rkey: 'test', validateRequest: true },
           ),
@@ -663,7 +915,7 @@ describe('Client', () => {
             // @ts-expect-error invalid DID
             did: 'not-a-did',
             displayName: 'Test',
-            createdAt: toDatetimeString(new Date()),
+            createdAt: currentDatetimeString(),
           },
           { rkey: 'test', validateRequest: false },
         )
@@ -686,7 +938,7 @@ describe('Client', () => {
             // @ts-expect-error invalid DID
             did: 'not-a-did',
             displayName: 'Test',
-            createdAt: toDatetimeString(new Date()),
+            createdAt: currentDatetimeString(),
           },
           { rkey: 'test' },
         )
@@ -727,7 +979,7 @@ describe('Client', () => {
               did,
               // @ts-expect-error wrong type
               displayName: 123,
-              createdAt: toDatetimeString(new Date()),
+              createdAt: currentDatetimeString(),
             },
             { rkey: 'test', validateRequest: true },
           ),
@@ -800,6 +1052,127 @@ describe('Client', () => {
         })
 
         expect(fetchHandler).toHaveBeenCalled()
+      })
+    })
+
+    describe('applyWrites()', () => {
+      it('allows applying multiple writes in a single request', async () => {
+        const fetchHandler = vi.fn<FetchHandler>(async (path, init) => {
+          const request = new Request(new URL(path, 'http://localhost'), init)
+          expect(request.method).toBe('POST')
+
+          const payload = com.atproto.repo.applyWrites.main.input.schema.parse(
+            lexParse(await request.text()),
+          )
+
+          let cid = 0
+          const body: com.atproto.repo.applyWrites.$OutputBody = {
+            results: payload.writes.map((write) => {
+              if (com.atproto.repo.applyWrites.create.$isTypeOf(write)) {
+                return com.atproto.repo.applyWrites.createResult.$build({
+                  uri: `at://${did}/${write.collection}/${write.rkey ?? '2222222222222'}`,
+                  cid: `${++cid}`,
+                })
+              }
+              if (com.atproto.repo.applyWrites.update.$isTypeOf(write)) {
+                return com.atproto.repo.applyWrites.updateResult.$build({
+                  uri: `at://${did}/${write.collection}/${write.rkey}`,
+                  cid: `${++cid}`,
+                })
+              }
+              if (com.atproto.repo.applyWrites.delete.$isTypeOf(write)) {
+                return com.atproto.repo.applyWrites.deleteResult.$build({
+                  uri: `at://${did}/${write.collection}/${write.rkey}`,
+                })
+              }
+
+              throw new Error('Unknown write type')
+            }),
+          }
+          return Response.json(body)
+        })
+
+        const client = new Client(
+          { fetchHandler, did },
+          { validateResponse: false },
+        )
+
+        const { body } = await client.applyWrites((op) => [
+          op.create(app.bsky.feed.post, {
+            text: 'Hello, world!',
+            createdAt: currentDatetimeString(),
+          }),
+
+          op.update(app.bsky.actor.profile, {
+            displayName: 'Alice',
+          }),
+
+          op.delete(app.bsky.feed.post, {
+            rkey: 'old-post',
+          }),
+
+          op.delete(app.bsky.actor.profile),
+        ])
+
+        expect(fetchHandler).toHaveBeenCalledTimes(1)
+        expect(body.results).toEqual([
+          {
+            $type: 'com.atproto.repo.applyWrites#createResult',
+            uri: `at://${did}/app.bsky.feed.post/2222222222222`,
+            cid: '1',
+          },
+          {
+            $type: 'com.atproto.repo.applyWrites#updateResult',
+            uri: `at://${did}/app.bsky.actor.profile/self`,
+            cid: '2',
+          },
+          {
+            $type: 'com.atproto.repo.applyWrites#deleteResult',
+            uri: `at://${did}/app.bsky.feed.post/old-post`,
+          },
+          {
+            $type: 'com.atproto.repo.applyWrites#deleteResult',
+            uri: `at://${did}/app.bsky.actor.profile/self`,
+          },
+        ])
+      })
+
+      it('expects an options argument when rkey is needed', async () => {
+        const fetchHandler = vi.fn<FetchHandler>(async (path, init) => {
+          const request = new Request(new URL(path, 'http://localhost'), init)
+          expect(request.method).toBe('POST')
+          const payload = com.atproto.repo.applyWrites.main.input.schema.parse(
+            lexParse(await request.text()),
+          )
+
+          expect(payload.writes).toHaveLength(2)
+
+          return Response.json({})
+        })
+        const client = new Client(
+          { fetchHandler, did },
+          { validateResponse: false },
+        )
+
+        await client.applyWrites(function* (op) {
+          yield op.delete(app.bsky.actor.profile)
+          yield op.update(app.bsky.actor.profile, { displayName: 'Alice' })
+
+          expect(() => {
+            // @ts-expect-error
+            op.update(app.bsky.feed.post, {
+              text: 'Alice',
+              createdAt: currentDatetimeString(),
+            })
+          }).toThrow()
+
+          expect(() => {
+            // @ts-expect-error
+            op.delete(app.bsky.feed.post)
+          }).toThrow()
+        })
+
+        expect(fetchHandler).toHaveBeenCalledTimes(1)
       })
     })
   })

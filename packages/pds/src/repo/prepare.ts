@@ -1,64 +1,44 @@
 import { TID } from '@atproto/common'
-import { RecordSchema } from '@atproto/lex'
+import { RecordSchema, walk } from '@atproto/lex'
 import { encode } from '@atproto/lex-cbor'
 import {
-  BlobRef,
-  Cid,
-  LexMap,
-  TypedLexMap,
+  type Cid,
+  type LexMap,
+  type TypedBlobRef,
+  type TypedLexMap,
   cidForCbor,
   enumBlobRefs,
   isLegacyBlobRef,
 } from '@atproto/lex-data'
 import {
-  RecordCreateOp,
-  RecordDeleteOp,
-  RecordUpdateOp,
-  RecordWriteOp,
+  type RecordCreateOp,
+  type RecordDeleteOp,
+  type RecordUpdateOp,
+  type RecordWriteOp,
   WriteOpAction,
 } from '@atproto/repo'
 import {
   AtUri,
-  DidString,
-  NsidString,
-  RecordKeyString,
+  type DidString,
+  type NsidString,
+  type RecordKeyString,
   isValidRecordKey,
 } from '@atproto/syntax'
-import { hasExplicitSlur } from '../handle/explicit-slurs'
-import { app, chat, com } from '../lexicons/index.js'
+import { hasExplicitSlur } from '../handle/explicit-slurs.js'
+import * as lexicons from '../lexicons/index.js'
 import {
   InvalidRecordError,
-  PreparedCreate,
-  PreparedDelete,
-  PreparedUpdate,
-  PreparedWrite,
-  ValidationStatus,
-} from './types'
+  type PreparedCreate,
+  type PreparedDelete,
+  type PreparedUpdate,
+  type PreparedWrite,
+  type ValidationStatus,
+} from './types.js'
 
-// @TODO replace this with automatically fetched (& built) schemas
 const knownSchemas = new Map<string, RecordSchema>(
-  [
-    app.bsky.actor.profile.main,
-    app.bsky.actor.status.main,
-    app.bsky.feed.generator.main,
-    app.bsky.feed.like.main,
-    app.bsky.feed.post.main,
-    app.bsky.feed.postgate.main,
-    app.bsky.feed.repost.main,
-    app.bsky.feed.threadgate.main,
-    app.bsky.graph.block.main,
-    app.bsky.graph.follow.main,
-    app.bsky.graph.list.main,
-    app.bsky.graph.listblock.main,
-    app.bsky.graph.listitem.main,
-    app.bsky.graph.starterpack.main,
-    app.bsky.graph.verification.main,
-    app.bsky.labeler.service.main,
-    app.bsky.notification.declaration.main,
-    chat.bsky.actor.declaration.main,
-    com.atproto.lexicon.schema.main,
-    com.germnetwork.declaration.main,
-  ].map((schema: RecordSchema) => [schema.$type, schema]),
+  walk(lexicons)
+    .filter((s) => s instanceof RecordSchema)
+    .map((s) => [s.$type, s]),
 )
 
 const validateRecord = (
@@ -159,7 +139,7 @@ async function prepareWrite(opts: {
   validationPath?: (string | number)[]
 }): Promise<{
   record: TypedLexMap
-  blobs: BlobRef[]
+  blobs: TypedBlobRef[]
   validationStatus?: ValidationStatus
   uri: AtUri
   cid: Cid

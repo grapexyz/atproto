@@ -1,6 +1,6 @@
 {
   "name": "@atproto/lex-client",
-  "version": "0.0.18",
+  "version": "0.3.7",
   "license": "MIT",
   "description": "HTTP client for interacting with Lexicon based APIs",
   "keywords": [
@@ -16,24 +16,20 @@
     "directory": "packages/lex/lex-client"
   },
   "files": [
-    "./src",
-    "./tsconfig.build.json",
-    "./tsconfig.tests.json",
-    "./tsconfig.json",
     "./dist",
+    "./README.md",
     "./CHANGELOG.md"
   ],
   "sideEffects": false,
-  "type": "commonjs",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "browser": "./dist/index.js",
-      "import": "./dist/index.js",
       "default": "./dist/index.js"
     }
+  },
+  "engines": {
+    "node": ">=22"
   },
   "dependencies": {
     "@atproto/lex-data": "workspace:^",
@@ -44,10 +40,11 @@
   "devDependencies": {
     "@atproto/lex-cbor": "workspace:^",
     "@atproto/lex-builder": "workspace:^",
-    "vitest": "^4.0.16"
+    "vitest": "^4.1.10"
   },
   "scripts": {
-    "prebuild": "node ./scripts/lex-build.mjs",
+    "codegen:lex": "node ./scripts/lex-build.js",
+    "prebuild": "pnpm run '/^(codegen:.+)$/'",
     "build": "tsc --build tsconfig.build.json",
     "test": "vitest run"
   }

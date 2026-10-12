@@ -1,12 +1,14 @@
 import assert from 'node:assert'
-import { noUndefinedVals } from '@atproto/common'
-import { DidString, isDidString } from '@atproto/lex'
-import { subLogger as log } from './logger'
+import { SECOND, noUndefinedVals } from '@atproto/common'
+import { type DidString, isDidString } from '@atproto/lex'
+import { subLogger as log } from './logger.js'
 
 type LiveNowConfig = {
   did: DidString
   domains: string[]
 }[]
+
+export type NotificationsV2Algorithm = 'algoGravity' | 'algoLookback'
 
 export interface KwsConfig {
   apiKey: string
@@ -39,8 +41,8 @@ export interface ServerConfigValues {
   debugMode?: boolean
   port?: number
   publicUrl?: string
-  serverDid: string
-  alternateAudienceDids: string[]
+  serverDid: DidString
+  alternateAudienceDids: DidString[]
   entrywayJwtPublicKeyHex?: string
   liveNowConfig?: LiveNowConfig
   // external services
@@ -61,12 +63,26 @@ export interface ServerConfigValues {
   rolodexApiKey?: string
   rolodexHttpVersion?: '1.1' | '2'
   rolodexIgnoreBadTls?: boolean
+  externalRecordsSafeDomains?: string[]
   searchUrl?: string
   searchTagsHide: Set<string>
+  searchTagsHideAll: Set<string>
   suggestionsUrl?: string
   suggestionsApiKey?: string
+  atmosphereExploreTabService?: string
   topicsUrl?: string
   topicsApiKey?: string
+  irisUrl?: string
+  irisServiceDid?: DidString
+  seemoreServiceDid?: DidString
+  irisStagingServiceDid?: DidString
+  trendingFeedDid?: DidString
+  bskyFeedgenDids: Set<string>
+  irisApiKey?: string
+  irisFeedUris?: Set<string> // allowlist iris may serve instead of seeemore; whats-hot is gated by `iris:feed:enable`, other feeds by their per-rkey `iris:feed:<rkey>:enable` gate
+  irisStagingUrl?: string
+  irisStagingFeedUris?: Set<string> // serve via iris staging instead of the registered feed generator
+  feedGenSkeletonTimeout: number
   cdnUrl?: string
   videoPlaylistUrlPattern?: string
   videoThumbnailUrlPattern?: string
@@ -76,9 +92,9 @@ export interface ServerConfigValues {
   didPlcUrl: string
   handleResolveNameservers?: string[]
   // moderation and administration
-  modServiceDid: string
+  modServiceDid: DidString
   adminPasswords: string[]
-  labelsFromIssuerDids?: string[]
+  labelsFromIssuerDids?: DidString[]
   indexedAtEpoch?: Date
   // misc/dev
   blobCacheLocation?: string
@@ -96,12 +112,14 @@ export interface ServerConfigValues {
   visibilityTagRankPrefix: string
   // notifications
   notificationsDelayMs?: number
+  notificationsV2Algorithm?: NotificationsV2Algorithm
   // client config
   clientCheckEmailConfirmed?: boolean
   topicsEnabled?: boolean
   // http proxy agent
   disableSsrfProtection?: boolean
   proxyAllowHTTP2?: boolean
+  proxyConnectTimeout?: number
   proxyHeadersTimeout?: number
   proxyBodyTimeout?: number
   proxyMaxResponseSize?: number
@@ -110,6 +128,7 @@ export interface ServerConfigValues {
   kws?: KwsConfig
   debugFieldAllowedDids: Set<string>
   draftsLimit: number
+  searchV2OverrideHeader?: string
 }
 
 export class ServerConfig {
@@ -123,10 +142,12 @@ export class ServerConfig {
       process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test'
     const publicUrl = process.env.BSKY_PUBLIC_URL || undefined
     const serverDid = process.env.BSKY_SERVER_DID || 'did:example:test'
+    assert(isDidString(serverDid))
     const envPort = parseInt(process.env.BSKY_PORT || '', 10)
     const port = isNaN(envPort) ? 2584 : envPort
     const didPlcUrl = process.env.BSKY_DID_PLC_URL || 'http://localhost:2582'
     const alternateAudienceDids = envList(process.env.BSKY_ALT_AUDIENCE_DIDS)
+    assert(alternateAudienceDids.every(isDidString))
     const entrywayJwtPublicKeyHex =
       process.env.BSKY_ENTRYWAY_JWT_PUBLIC_KEY_HEX || undefined
     let liveNowConfig: LiveNowConfig | undefined
@@ -160,10 +181,37 @@ export class ServerConfig {
       process.env.BSKY_SEARCH_ENDPOINT ||
       undefined
     const searchTagsHide = new Set(envList(process.env.BSKY_SEARCH_TAGS_HIDE))
+    const searchTagsHideAll = new Set(
+      envList(process.env.BSKY_SEARCH_TAGS_HIDE_ALL),
+    )
     const suggestionsUrl = process.env.BSKY_SUGGESTIONS_URL || undefined
     const suggestionsApiKey = process.env.BSKY_SUGGESTIONS_API_KEY || undefined
+    const atmosphereExploreTabService =
+      process.env.BSKY_ATMOSPHERE_EXPLORE_TAB_SERVICE || undefined
     const topicsUrl = process.env.BSKY_TOPICS_URL || undefined
     const topicsApiKey = process.env.BSKY_TOPICS_API_KEY
+    const irisUrl = process.env.BSKY_IRIS_URL || undefined
+    const irisServiceDid = process.env.BSKY_IRIS_SERVICE_DID || undefined
+    assert(irisServiceDid == null || isDidString(irisServiceDid))
+    const seemoreServiceDid = process.env.BSKY_SEEMORE_SERVICE_DID || undefined
+    assert(seemoreServiceDid == null || isDidString(seemoreServiceDid))
+    const irisStagingServiceDid =
+      process.env.BSKY_IRIS_STAGING_SERVICE_DID || undefined
+    assert(irisStagingServiceDid == null || isDidString(irisStagingServiceDid))
+    const trendingFeedDid = process.env.BSKY_TRENDING_FEED_DID || undefined
+    assert(trendingFeedDid == null || isDidString(trendingFeedDid))
+    const bskyFeedgenDids = new Set(
+      envList(process.env.BSKY_FEEDGEN_DIDS).filter(isDidString),
+    )
+    const irisApiKey = process.env.BSKY_IRIS_API_KEY || undefined
+    const irisFeedUris = new Set(envList(process.env.BSKY_IRIS_FEED_URIS))
+    const irisStagingUrl = process.env.BSKY_IRIS_STAGING_URL || undefined
+    const irisStagingFeedUris = new Set(
+      envList(process.env.BSKY_IRIS_STAGING_FEED_URIS),
+    )
+    const feedGenSkeletonTimeout = process.env.BSKY_FEED_GEN_SKELETON_TIMEOUT
+      ? parseInt(process.env.BSKY_FEED_GEN_SKELETON_TIMEOUT || '', 10)
+      : 5 * SECOND
     const dataplaneUrls =
       overrides?.dataplaneUrls ?? envList(process.env.BSKY_DATAPLANE_URLS)
     const dataplaneUrlsEtcdKeyPrefix =
@@ -183,6 +231,7 @@ export class ServerConfig {
     const labelsFromIssuerDids = envList(
       process.env.BSKY_LABELS_FROM_ISSUER_DIDS,
     )
+    assert(labelsFromIssuerDids.every(isDidString))
     const bsyncUrl = process.env.BSKY_BSYNC_URL || undefined
     assert(bsyncUrl)
     const bsyncApiKey = process.env.BSKY_BSYNC_API_KEY || undefined
@@ -201,6 +250,11 @@ export class ServerConfig {
     const rolodexIgnoreBadTls =
       process.env.BSKY_ROLODEX_IGNORE_BAD_TLS === 'true'
     assert(rolodexHttpVersion === '1.1' || rolodexHttpVersion === '2')
+    const externalRecordsSafeDomains = envList(
+      process.env.BSKY_EXTERNAL_RECORDS_SAFE_DOMAINS,
+    )
+      .map((value) => value.trim())
+      .filter(Boolean)
     const blobRateLimitBypassKey =
       process.env.BSKY_BLOB_RATE_LIMIT_BYPASS_KEY || undefined
     // single domain would be e.g. "mypds.com", subdomains are supported with a leading dot e.g. ".mypds.com"
@@ -214,7 +268,7 @@ export class ServerConfig {
       process.env.BSKY_ADMIN_PASSWORDS || process.env.BSKY_ADMIN_PASSWORD,
     )
     const modServiceDid = process.env.MOD_SERVICE_DID
-    assert(modServiceDid)
+    assert(modServiceDid != null && isDidString(modServiceDid))
 
     const eventProxyTrackingEndpoint =
       process.env.BSKY_EVENT_PROXY_TRACKING_ENDPOINT || undefined
@@ -254,12 +308,18 @@ export class ServerConfig {
     const notificationsDelayMs = process.env.BSKY_NOTIFICATIONS_DELAY_MS
       ? parseInt(process.env.BSKY_NOTIFICATIONS_DELAY_MS || '', 10)
       : 0
+    const notificationsV2Algorithm =
+      process.env.BSKY_NOTIFICATIONS_V2_ALGORITHM === 'algoLookback'
+        ? 'algoLookback'
+        : 'algoGravity'
 
     const disableSsrfProtection = process.env.BSKY_DISABLE_SSRF_PROTECTION
       ? process.env.BSKY_DISABLE_SSRF_PROTECTION === 'true'
       : debugMode
 
     const proxyAllowHTTP2 = process.env.BSKY_PROXY_ALLOW_HTTP2 === 'true'
+    const proxyConnectTimeout =
+      parseInt(process.env.BSKY_PROXY_CONNECT_TIMEOUT || '', 10) || undefined
     const proxyHeadersTimeout =
       parseInt(process.env.BSKY_PROXY_HEADERS_TIMEOUT || '', 10) || undefined
     const proxyBodyTimeout =
@@ -331,6 +391,9 @@ export class ServerConfig {
       ? parseInt(process.env.BSKY_DRAFTS_LIMIT || '', 10)
       : 500
 
+    const searchV2OverrideHeader =
+      process.env.BSKY_SEARCH_V2_OVERRIDE_HEADER || undefined
+
     return new ServerConfig({
       version,
       debugMode,
@@ -347,10 +410,23 @@ export class ServerConfig {
       dataplaneIgnoreBadTls,
       searchUrl,
       searchTagsHide,
+      searchTagsHideAll,
       suggestionsUrl,
       suggestionsApiKey,
+      atmosphereExploreTabService,
       topicsUrl,
       topicsApiKey,
+      irisUrl,
+      irisServiceDid,
+      seemoreServiceDid,
+      irisStagingServiceDid,
+      trendingFeedDid,
+      bskyFeedgenDids,
+      irisApiKey,
+      irisFeedUris,
+      irisStagingUrl,
+      irisStagingFeedUris,
+      feedGenSkeletonTimeout,
       didPlcUrl,
       labelsFromIssuerDids,
       handleResolveNameservers,
@@ -370,6 +446,7 @@ export class ServerConfig {
       rolodexApiKey,
       rolodexHttpVersion,
       rolodexIgnoreBadTls,
+      externalRecordsSafeDomains,
       blobRateLimitBypassKey,
       blobRateLimitBypassHostname,
       adminPasswords,
@@ -389,8 +466,10 @@ export class ServerConfig {
       visibilityTagHide,
       visibilityTagRankPrefix,
       notificationsDelayMs,
+      notificationsV2Algorithm,
       disableSsrfProtection,
       proxyAllowHTTP2,
+      proxyConnectTimeout,
       proxyHeadersTimeout,
       proxyBodyTimeout,
       proxyMaxResponseSize,
@@ -399,6 +478,7 @@ export class ServerConfig {
       kws,
       debugFieldAllowedDids,
       draftsLimit,
+      searchV2OverrideHeader,
       ...noUndefinedVals(overrides ?? {}),
     })
   }
@@ -516,6 +596,10 @@ export class ServerConfig {
     return this.cfg.searchTagsHide
   }
 
+  get searchTagsHideAll() {
+    return this.cfg.searchTagsHideAll
+  }
+
   get suggestionsUrl() {
     return this.cfg.suggestionsUrl
   }
@@ -524,12 +608,60 @@ export class ServerConfig {
     return this.cfg.suggestionsApiKey
   }
 
+  get atmosphereExploreTabService() {
+    return this.cfg.atmosphereExploreTabService
+  }
+
   get topicsUrl() {
     return this.cfg.topicsUrl
   }
 
   get topicsApiKey() {
     return this.cfg.topicsApiKey
+  }
+
+  get irisUrl() {
+    return this.cfg.irisUrl
+  }
+
+  get irisServiceDid() {
+    return this.cfg.irisServiceDid
+  }
+
+  get seemoreServiceDid() {
+    return this.cfg.seemoreServiceDid
+  }
+
+  get irisStagingServiceDid() {
+    return this.cfg.irisStagingServiceDid
+  }
+
+  get trendingFeedDid() {
+    return this.cfg.trendingFeedDid
+  }
+
+  get bskyFeedgenDids() {
+    return this.cfg.bskyFeedgenDids
+  }
+
+  get irisApiKey() {
+    return this.cfg.irisApiKey
+  }
+
+  get irisFeedUris() {
+    return this.cfg.irisFeedUris
+  }
+
+  get irisStagingUrl() {
+    return this.cfg.irisStagingUrl
+  }
+
+  get irisStagingFeedUris() {
+    return this.cfg.irisStagingFeedUris
+  }
+
+  get feedGenSkeletonTimeout() {
+    return this.cfg.feedGenSkeletonTimeout
   }
 
   get cdnUrl() {
@@ -636,12 +768,20 @@ export class ServerConfig {
     return this.cfg.notificationsDelayMs ?? 0
   }
 
+  get notificationsV2Algorithm(): NotificationsV2Algorithm {
+    return this.cfg.notificationsV2Algorithm ?? 'algoGravity'
+  }
+
   get disableSsrfProtection(): boolean {
     return this.cfg.disableSsrfProtection ?? false
   }
 
   get proxyAllowHTTP2(): boolean {
     return this.cfg.proxyAllowHTTP2 ?? false
+  }
+
+  get proxyConnectTimeout(): number | undefined {
+    return this.cfg.proxyConnectTimeout
   }
 
   get proxyHeadersTimeout(): number {
@@ -674,6 +814,14 @@ export class ServerConfig {
 
   get draftsLimit() {
     return this.cfg.draftsLimit
+  }
+
+  get searchV2OverrideHeader() {
+    return this.cfg.searchV2OverrideHeader
+  }
+
+  get externalRecordsSafeDomains() {
+    return this.cfg.externalRecordsSafeDomains ?? []
   }
 }
 

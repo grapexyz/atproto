@@ -1,40 +1,42 @@
-import { Selectable, sql } from 'kysely'
+import { type Selectable, sql } from 'kysely'
 import { DAY, HOUR } from '@atproto/common'
-import { IdResolver, getPds } from '@atproto/identity'
-import { Cid, l, parseCid, xrpc, xrpcSafe } from '@atproto/lex'
+import { type IdResolver, getPds } from '@atproto/identity'
+import { type Cid, l, parseCid, xrpc, xrpcSafe } from '@atproto/lex'
 import {
-  VerifiedRepo,
+  type VerifiedRepo,
   WriteOpAction,
   getAndParseRecord,
   readCarWithRoot,
   verifyRepo,
 } from '@atproto/repo'
-import { AtUri, DidString } from '@atproto/syntax'
-import { com } from '../../../lexicons'
-import { subLogger } from '../../../logger'
-import { retryXrpc } from '../../../util/retry'
-import { BackgroundQueue } from '../background'
-import { Database } from '../db'
-import { Actor } from '../db/tables/actor'
-import * as Block from './plugins/block'
-import * as ChatDeclaration from './plugins/chat-declaration'
-import * as FeedGenerator from './plugins/feed-generator'
-import * as Follow from './plugins/follow'
-import * as GermDeclaration from './plugins/germ-declaration'
-import * as Labeler from './plugins/labeler'
-import * as Like from './plugins/like'
-import * as List from './plugins/list'
-import * as ListBlock from './plugins/list-block'
-import * as ListItem from './plugins/list-item'
-import * as NotifDeclaration from './plugins/notif-declaration'
-import * as Post from './plugins/post'
-import * as Postgate from './plugins/post-gate'
-import * as Profile from './plugins/profile'
-import * as Repost from './plugins/repost'
-import * as StarterPack from './plugins/starter-pack'
-import * as Status from './plugins/status'
-import * as Threadgate from './plugins/thread-gate'
-import * as Verification from './plugins/verification'
+import { AtUri, type DidString } from '@atproto/syntax'
+import { com } from '../../../lexicons/index.js'
+import { subLogger } from '../../../logger.js'
+import { retryXrpc } from '../../../util/retry.js'
+import type { BackgroundQueue } from '../background.js'
+import type { Database } from '../db/index.js'
+import type { Actor } from '../db/tables/actor.js'
+import * as Block from './plugins/block.js'
+import * as ChatDeclaration from './plugins/chat-declaration.js'
+import * as FeedGenerator from './plugins/feed-generator.js'
+import * as Follow from './plugins/follow.js'
+import * as GermDeclaration from './plugins/germ-declaration.js'
+import * as Labeler from './plugins/labeler.js'
+import * as Like from './plugins/like.js'
+import * as ListBlock from './plugins/list-block.js'
+import * as ListItem from './plugins/list-item.js'
+import * as List from './plugins/list.js'
+import * as NotifDeclaration from './plugins/notif-declaration.js'
+import * as Postgate from './plugins/post-gate.js'
+import * as Post from './plugins/post.js'
+import * as ProfileLink from './plugins/profile-link.js'
+import * as Profile from './plugins/profile.js'
+import * as ReferenceListOptOut from './plugins/reference-list-opt-out.js'
+import * as Repost from './plugins/repost.js'
+import * as StarterPack from './plugins/starter-pack.js'
+import * as Status from './plugins/status.js'
+import * as Threadgate from './plugins/thread-gate.js'
+import * as Verification from './plugins/verification.js'
 
 export class IndexingService {
   records: {
@@ -47,6 +49,7 @@ export class IndexingService {
     profile: Profile.PluginType
     list: List.PluginType
     listItem: ListItem.PluginType
+    referenceListOptOut: ReferenceListOptOut.PluginType
     listBlock: ListBlock.PluginType
     block: Block.PluginType
     feedGenerator: FeedGenerator.PluginType
@@ -55,6 +58,7 @@ export class IndexingService {
     notifDeclaration: NotifDeclaration.PluginType
     chatDeclaration: ChatDeclaration.PluginType
     germDeclaration: GermDeclaration.PluginType
+    profileLink: ProfileLink.PluginType
     verification: Verification.PluginType
     status: Status.PluginType
   }
@@ -62,7 +66,7 @@ export class IndexingService {
   constructor(
     public db: Database,
     public idResolver: IdResolver,
-    public background: BackgroundQueue,
+    public background: BackgroundQueue<Database>,
   ) {
     this.records = {
       post: Post.makePlugin(this.db, this.background),
@@ -74,6 +78,10 @@ export class IndexingService {
       profile: Profile.makePlugin(this.db, this.background),
       list: List.makePlugin(this.db, this.background),
       listItem: ListItem.makePlugin(this.db, this.background),
+      referenceListOptOut: ReferenceListOptOut.makePlugin(
+        this.db,
+        this.background,
+      ),
       listBlock: ListBlock.makePlugin(this.db, this.background),
       block: Block.makePlugin(this.db, this.background),
       feedGenerator: FeedGenerator.makePlugin(this.db, this.background),
@@ -82,6 +90,7 @@ export class IndexingService {
       notifDeclaration: NotifDeclaration.makePlugin(this.db, this.background),
       chatDeclaration: ChatDeclaration.makePlugin(this.db, this.background),
       germDeclaration: GermDeclaration.makePlugin(this.db, this.background),
+      profileLink: ProfileLink.makePlugin(this.db, this.background),
       verification: Verification.makePlugin(this.db, this.background),
       status: Status.makePlugin(this.db, this.background),
     }
@@ -327,6 +336,10 @@ export class IndexingService {
       .deleteFrom('list_item')
       .where('creator', '=', did)
       .execute()
+    await this.db.db
+      .deleteFrom('reference_list_opt_out')
+      .where('creator', '=', did)
+      .execute()
     await this.db.db.deleteFrom('list').where('creator', '=', did).execute()
     // blocks
     await this.db.db
@@ -354,6 +367,14 @@ export class IndexingService {
     await this.db.db
       .deleteFrom('post_embed_record')
       .where('post_embed_record.postUri', 'in', postByUser)
+      .execute()
+    await this.db.db
+      .deleteFrom('post_embed_video')
+      .where('post_embed_video.postUri', 'in', postByUser)
+      .execute()
+    await this.db.db
+      .deleteFrom('post_embed_gallery_image')
+      .where('post_embed_gallery_image.postUri', 'in', postByUser)
       .execute()
     await this.db.db.deleteFrom('post').where('creator', '=', did).execute()
     await this.db.db

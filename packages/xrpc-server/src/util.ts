@@ -1,9 +1,9 @@
 import assert from 'node:assert'
-import { IncomingMessage, OutgoingMessage } from 'node:http'
-import { Duplex, Readable, pipeline } from 'node:stream'
+import type { IncomingMessage, OutgoingMessage } from 'node:http'
+import { type Duplex, type Readable, pipeline } from 'node:stream'
 import {
-  Request as ExpressRequest,
-  Response as ExpressResponse,
+  type Request as ExpressRequest,
+  type Response as ExpressResponse,
   json,
   text,
 } from 'express'
@@ -16,28 +16,28 @@ import {
   type LexXrpcProcedure,
   type LexXrpcQuery,
   type LexXrpcSubscription,
-  Lexicons,
+  type Lexicons,
   jsonToLex as jsonToLexWithBlobRef,
 } from '@atproto/lexicon'
 import { ResponseType } from '@atproto/xrpc'
 import {
-  ErrorResult,
+  type ErrorResult,
   InternalServerError,
   InvalidRequestError,
   XRPCError,
-} from './errors'
+} from './errors.js'
 import {
-  Auth,
-  Input,
-  LexMethodInput,
-  LexMethodOutput,
-  LexMethodParams,
-  Output,
-  Params,
-  RouteOptions,
-  UndecodedParams,
+  type Auth,
+  type Input,
+  type LexMethodInput,
+  type LexMethodOutput,
+  type LexMethodParams,
+  type Output,
+  type Params,
+  type RouteOptions,
+  type UndecodedParams,
   handlerSuccess,
-} from './types'
+} from './types.js'
 
 export type ParamsVerifierInternal<P extends Params = Params> = (
   req: IncomingMessage | ExpressRequest,
@@ -160,12 +160,13 @@ export function getQueryParams(
   req: IncomingMessage | ExpressRequest,
   opts?: { parseLoose?: boolean },
 ): UndecodedParams {
-  if ('query' in req) return req.query
-
   const result: UndecodedParams = Object.create(null)
+  const expressQuery = 'query' in req ? req.query : undefined
 
   const searchParams = getSearchParams(req.url, opts)
-  if (!searchParams) return result
+  if (!searchParams) {
+    return expressQuery ?? result
+  }
 
   if (searchParams.has('__proto__')) {
     // Prevent prototype pollution
@@ -178,6 +179,17 @@ export function getQueryParams(
   for (const key of searchParams.keys()) {
     const values = searchParams.getAll(key)
     result[key] = values.length === 1 ? values[0] : values
+  }
+
+  // Preserve Express's support for bracket-style query parameters in the
+  // legacy Lexicons path, but let repeated standard params from the URL win so
+  // Express/qs array limits cannot collapse them into numeric-keyed objects.
+  if (expressQuery) {
+    for (const [key, value] of Object.entries(expressQuery)) {
+      if (!(key in result)) {
+        result[key] = value
+      }
+    }
   }
 
   return result
@@ -235,11 +247,7 @@ export function createLexiconInputVerifier<I extends Input = Input>(
   if (def.type === 'query' || !def.input) {
     return async (req) => {
       // @NOTE We allow (and ignore) "empty" bodies
-      if (getBodyPresence(req) === 'present') {
-        throw new InvalidRequestError(
-          `A request body was provided when none was expected`,
-        )
-      }
+      await assertEmptyBody(req)
 
       return undefined as I
     }
@@ -309,12 +317,7 @@ export function createSchemaInputVerifier<M extends l.Procedure | l.Query>(
   if (!input?.encoding) {
     //
     return async (req) => {
-      if (getBodyPresence(req) === 'present') {
-        // @NOTE we *could* also discard the body here instead of throwing an error
-        throw new InvalidRequestError(
-          `A request body was provided when none was expected`,
-        )
-      }
+      await assertEmptyBody(req)
 
       return undefined as LexMethodInput<M>
     }
@@ -519,6 +522,36 @@ function getBodyPresence(req: IncomingMessage): BodyPresence {
   if (req.headers['content-length'] === '0') return 'empty'
   if (req.headers['content-length'] != null) return 'present'
   return 'missing'
+}
+
+async function assertEmptyBody(req: IncomingMessage): Promise<void> {
+  const presence = getBodyPresence(req)
+  if (presence !== 'present') return
+  if (req.headers['transfer-encoding'] == null) {
+    throw new InvalidRequestError(
+      `A request body was provided when none was expected`,
+    )
+  }
+
+  // @NOTE Transfer-Encoding only signals framing; a chunked body may be empty.
+  let hasData = false
+  try {
+    for await (const chunk of req) {
+      if (chunk.length > 0) hasData = true
+    }
+  } catch (cause) {
+    throw new InvalidRequestError(
+      'Failed to process unexpected request body',
+      undefined,
+      { cause },
+    )
+  }
+
+  if (hasData) {
+    throw new InvalidRequestError(
+      `A request body was provided when none was expected`,
+    )
+  }
 }
 
 function createBodyParser(inputEncoding: string, options: RouteOptions) {
